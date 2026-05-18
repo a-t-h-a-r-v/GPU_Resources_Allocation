@@ -57,7 +57,6 @@ var otpStore = make(map[string]string)
 var mu sync.Mutex
 
 // --- Database Setup ---
-// --- Database Setup ---
 func initDB() *gorm.DB {
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
 		os.Getenv("DB_USER"),
@@ -112,6 +111,40 @@ func sendOTPEmail(to, otp string) error {
 
 	auth := smtp.PlainAuth("", from, password, host)
 	msg := []byte("To: " + to + "\r\nSubject: CCF GPU Portal - Your OTP\r\n\r\nYour OTP is: " + otp)
+	return smtp.SendMail(host+":"+port, auth, from, []string{to}, msg)
+}
+
+// --- NEW: Function to send Allocation Details Email ---
+func sendAllocationEmail(to, fullName, resourceId, gpuNumber, username, password, startDate, endDate string) error {
+	from := os.Getenv("SMTP_EMAIL")
+	smtpPassword := os.Getenv("SMTP_PASSWORD")
+	host := os.Getenv("SMTP_HOST")
+	port := os.Getenv("SMTP_PORT")
+
+	subject := "Subject: CCF GPU Portal - Resource Allocation Details\r\n"
+	body := fmt.Sprintf("Dear %s,\r\n\r\nYour request for GPU resources has been approved and allocated.\r\n\r\n"+
+		"Allocation Details:\r\n"+
+		"- Resource ID: %s\r\n"+
+		"- GPU Number: %s\r\n"+
+		"- Start Date: %s\r\n"+
+		"- End Date: %s\r\n\r\n"+
+		"Login Credentials:\r\n"+
+		"- Username: %s\r\n"+
+		"- Password: %s\r\n\r\n"+
+		"Please ensure you follow the acceptable use policy.\r\n\r\nRegards,\r\nAdmin Team\r\n",
+		fullName, resourceId, gpuNumber, startDate, endDate, username, password)
+
+	if from == "" || smtpPassword == "" {
+		log.Printf("\n======================================================")
+		log.Printf("⚠️ LOCAL DEV MODE: No SMTP credentials found.")
+		log.Printf("📧 Simulated Allocation Email to: %s", to)
+		log.Printf("Message:\n%s", body)
+		log.Printf("======================================================\n")
+		return nil
+	}
+
+	auth := smtp.PlainAuth("", from, smtpPassword, host)
+	msg := []byte("To: " + to + "\r\n" + subject + "\r\n" + body)
 	return smtp.SendMail(host+":"+port, auth, from, []string{to}, msg)
 }
 
@@ -242,7 +275,7 @@ func main() {
 				c.JSON(http.StatusOK, gin.H{"message": "Request declined successfully"})
 			})
 
-			// --- UPDATED: Accepts Username & Password for allocation ---
+			// --- UPDATED: Accepts Username & Password and sends email ---
 			admin.POST("/requests/:id/allocate", func(c *gin.Context) {
 				reqID := c.Param("id")
 				var payload struct {
@@ -254,24 +287,59 @@ func main() {
 				if c.ShouldBindJSON(&payload) != nil { return }
 
 				var req Request
-				db.First(&req, reqID)
-				startDate, _ := time.Parse("2006-01-02", payload.StartDate)
+				if err := db.First(&req, reqID).Error; err != nil {
+					c.JSON(http.StatusNotFound, gin.H{"error": "Request not found"})
+					return
+				}
 
-				db.Transaction(func(tx *gorm.DB) error {
-					endDate := startDate.AddDate(0, 0, req.NumberOfDays)
+				// Fetch device details needed for the email
+				var device Device
+				if err := db.First(&device, payload.DeviceID).Error; err != nil {
+					c.JSON(http.StatusNotFound, gin.H{"error": "Device not found"})
+					return
+				}
+
+				startDate, _ := time.Parse("2006-01-02", payload.StartDate)
+				endDate := startDate.AddDate(0, 0, req.NumberOfDays)
+
+				err := db.Transaction(func(tx *gorm.DB) error {
 					// Save the custom credentials to the allocation table
-					tx.Create(&Allocation{
+					if err := tx.Create(&Allocation{
 						RequestID: req.ID, 
-						DeviceID: payload.DeviceID, 
-						Username: payload.Username,
-						Password: payload.Password,
+						DeviceID:  payload.DeviceID, 
+						Username:  payload.Username,
+						Password:  payload.Password,
 						StartDate: startDate, 
-						EndDate: endDate,
-					})
+						EndDate:   endDate,
+					}).Error; err != nil {
+						return err
+					}
+					
 					req.Status = "Allocated"
-					tx.Save(&req)
+					if err := tx.Save(&req).Error; err != nil {
+						return err
+					}
+					
 					return tx.Model(&Device{}).Where("id = ?", payload.DeviceID).Update("status", "Allocated").Error
 				})
+
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to allocate"})
+					return
+				}
+
+				// Trigger email asynchronously to avoid blocking the HTTP response
+				go sendAllocationEmail(
+					req.Email,
+					req.FullName,
+					device.ResourceID,
+					device.GPUNumber,
+					payload.Username,
+					payload.Password,
+					startDate.Format("2006-01-02"),
+					endDate.Format("2006-01-02"),
+				)
+
 				c.JSON(http.StatusOK, gin.H{"message": "Allocated"})
 			})
 
