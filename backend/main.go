@@ -31,9 +31,32 @@ type Request struct {
 	Status        string    `gorm:"default:'Pending'" json:"status"`
 }
 
+type Device struct {
+	ID               uint   `gorm:"primaryKey" json:"id"`
+	ResourceID       string `json:"resourceId"`
+	GPUNumber        string `json:"gpuNumber"`
+	ResourceType     string `json:"resourceType"`
+	IPAddress        string `json:"ipAddress"`
+	Username         string `json:"username"`
+	Password         string `json:"password"`
+	CredentialActive bool   `json:"credentialActive"`
+	Status           string `gorm:"default:'Available'" json:"status"`
+}
+
+type Allocation struct {
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	RequestID uint      `json:"requestId"`
+	DeviceID  uint      `json:"deviceId"`
+	Username  string    `json:"username"` // NEW: Allocation specific username
+	Password  string    `json:"password"` // NEW: Allocation specific password
+	StartDate time.Time `json:"startDate"`
+	EndDate   time.Time `json:"endDate"`
+}
+
 var otpStore = make(map[string]string)
 var mu sync.Mutex
 
+// --- Database Setup ---
 // --- Database Setup ---
 func initDB() *gorm.DB {
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
@@ -44,27 +67,40 @@ func initDB() *gorm.DB {
 		os.Getenv("DB_NAME"),
 	)
 
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
-	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+	var db *gorm.DB
+	var err error
+
+	// NEW: Smart retry loop to handle Docker's race condition
+	for i := 1; i <= 10; i++ {
+		db, err = gorm.Open(mysql.Open(dsn), &gorm.Config{})
+		if err == nil {
+			log.Println("✅ Successfully connected to the database!")
+			break
+		}
+		log.Printf("⚠️ Attempt %d: Database not ready yet. Retrying in 3 seconds...", i)
+		time.Sleep(3 * time.Second)
 	}
 
-	err = db.AutoMigrate(&Request{})
 	if err != nil {
-		log.Fatalf("Failed to migrate database: %v", err)
+		log.Fatalf("❌ Failed to connect to database after 10 attempts: %v", err)
+	}
+
+	// AutoMigrate creates the tables automatically
+	log.Println("⚙️ Running AutoMigrate...")
+	err = db.AutoMigrate(&Request{}, &Device{}, &Allocation{})
+	if err != nil {
+		log.Fatalf("❌ Failed to migrate database: %v", err)
 	}
 
 	return db
 }
 
-// --- Email / OTP Logic ---
 func sendOTPEmail(to, otp string) error {
 	from := os.Getenv("SMTP_EMAIL")
 	password := os.Getenv("SMTP_PASSWORD")
 	host := os.Getenv("SMTP_HOST")
 	port := os.Getenv("SMTP_PORT")
 
-	// LOCAL TESTING FALLBACK
 	if from == "" || password == "" {
 		log.Printf("\n======================================================")
 		log.Printf("⚠️ LOCAL DEV MODE: No SMTP credentials found.")
@@ -75,16 +111,10 @@ func sendOTPEmail(to, otp string) error {
 	}
 
 	auth := smtp.PlainAuth("", from, password, host)
-	msg := []byte("To: " + to + "\r\n" +
-		"Subject: CCF GPU Portal - Your OTP\r\n" +
-		"\r\n" +
-		"Your One-Time Password (OTP) for the Central Computing Facility is: " + otp + "\r\n\r\n" +
-		"This OTP is valid for your current session.")
-
+	msg := []byte("To: " + to + "\r\nSubject: CCF GPU Portal - Your OTP\r\n\r\nYour OTP is: " + otp)
 	return smtp.SendMail(host+":"+port, auth, from, []string{to}, msg)
 }
 
-// --- JWT Claims & Middleware ---
 type AdminClaims struct {
 	Username string `json:"username"`
 	jwt.RegisteredClaims
@@ -97,34 +127,28 @@ func RequireAdminAuth() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized Access"})
 			return
 		}
-
 		token, err := jwt.ParseWithClaims(tokenString, &AdminClaims{}, func(token *jwt.Token) (interface{}, error) {
 			return []byte(os.Getenv("JWT_SECRET")), nil
 		})
-
 		if err != nil || !token.Valid {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid or Expired Session"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid Session"})
 			return
 		}
-
 		c.Next()
 	}
 }
 
-// --- Main Application Entrypoint ---
 func main() {
 	_ = godotenv.Load()
 
 	db := initDB()
 	r := gin.Default()
 
-	// Strict CORS Middleware (Required for secure cookies)
 	r.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", c.Request.Header.Get("Origin"))
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE, PATCH")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return
@@ -134,145 +158,198 @@ func main() {
 
 	api := r.Group("/api")
 	{
-		// 1. Send OTP Endpoint
 		api.POST("/auth/otp/send", func(c *gin.Context) {
-			var req struct {
-				Email string `json:"email" binding:"required"`
-			}
-			if err := c.ShouldBindJSON(&req); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid email"})
-				return
-			}
-
+			var req struct{ Email string `json:"email" binding:"required"` }
+			if c.ShouldBindJSON(&req) != nil { return }
 			otp := fmt.Sprintf("%06d", rand.Intn(1000000))
 			mu.Lock()
 			otpStore[req.Email] = otp
 			mu.Unlock()
-
-			err := sendOTPEmail(req.Email, otp)
-			if err != nil {
-				log.Printf("Failed to send email: %v", err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send OTP email"})
-				return
-			}
-
+			sendOTPEmail(req.Email, otp)
 			c.JSON(http.StatusOK, gin.H{"message": "OTP sent successfully"})
 		})
 
-		// 2. Verify OTP Endpoint
 		api.POST("/auth/otp/verify", func(c *gin.Context) {
-			var req struct {
-				Email string `json:"email" binding:"required"`
-				OTP   string `json:"otp" binding:"required"`
-			}
-			if err := c.ShouldBindJSON(&req); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload"})
-				return
-			}
-
+			var req struct{ Email, OTP string }
+			if c.ShouldBindJSON(&req) != nil { return }
 			mu.Lock()
 			storedOTP, exists := otpStore[req.Email]
 			mu.Unlock()
-
 			if !exists || storedOTP != req.OTP {
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired OTP"})
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid OTP"})
 				return
 			}
-
 			mu.Lock()
 			delete(otpStore, req.Email)
 			mu.Unlock()
-
 			c.JSON(http.StatusOK, gin.H{"message": "OTP verified"})
 		})
 
-		// 3. Submit Request Form
 		api.POST("/requests", func(c *gin.Context) {
 			var form Request
-			if err := c.ShouldBindJSON(&form); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-				return
-			}
-
-			if err := db.Create(&form).Error; err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save request"})
-				return
-			}
-
-			c.JSON(http.StatusCreated, gin.H{"message": "Request saved successfully", "request": form})
+			if c.ShouldBindJSON(&form) != nil { return }
+			db.Create(&form)
+			c.JSON(http.StatusCreated, gin.H{"message": "Saved"})
 		})
 
-		// 4. Secure Admin Login Endpoint
 		api.POST("/admin/login", func(c *gin.Context) {
-			var req struct {
-				Username string `json:"username" binding:"required"`
-				Password string `json:"password" binding:"required"`
-			}
-
-			// Throttling to prevent brute-force attacks
+			var req struct{ Username, Password string }
 			time.Sleep(500 * time.Millisecond)
+			if c.ShouldBindJSON(&req) != nil { return }
 
-			if err := c.ShouldBindJSON(&req); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload"})
-				return
-			}
-
-			expectedUser := os.Getenv("ADMIN_USERNAME")
-			expectedPass := os.Getenv("ADMIN_PASSWORD")
-
-			// ConstantTimeCompare prevents timing attacks
-			userMatch := subtle.ConstantTimeCompare([]byte(req.Username), []byte(expectedUser)) == 1
-			passMatch := subtle.ConstantTimeCompare([]byte(req.Password), []byte(expectedPass)) == 1
-
-			if !userMatch || !passMatch {
+			if subtle.ConstantTimeCompare([]byte(req.Username), []byte(os.Getenv("ADMIN_USERNAME"))) != 1 ||
+				subtle.ConstantTimeCompare([]byte(req.Password), []byte(os.Getenv("ADMIN_PASSWORD"))) != 1 {
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 				return
 			}
 
-			// Generate the JWT
-			expirationTime := time.Now().Add(24 * time.Hour)
-			claims := &AdminClaims{
-				Username: req.Username,
-				RegisteredClaims: jwt.RegisteredClaims{
-					ExpiresAt: jwt.NewNumericDate(expirationTime),
-				},
-			}
-
+			claims := &AdminClaims{Username: req.Username, RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour))}}
 			token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-			tokenString, err := token.SignedString([]byte(os.Getenv("JWT_SECRET")))
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not generate token"})
-				return
-			}
+			tokenString, _ := token.SignedString([]byte(os.Getenv("JWT_SECRET")))
 
-			// Assign HttpOnly Cookie
 			c.SetCookie("admin_session", tokenString, 86400, "/", "", false, true)
-			c.JSON(http.StatusOK, gin.H{"message": "Authentication successful"})
+			c.JSON(http.StatusOK, gin.H{"message": "Success"})
 		})
 
-		// 5. Admin Logout Endpoint
 		api.POST("/admin/logout", func(c *gin.Context) {
-			// Destroy the cookie
 			c.SetCookie("admin_session", "", -1, "/", "", false, true)
 			c.JSON(http.StatusOK, gin.H{"message": "Logged out"})
 		})
 
-		// 6. Protected Admin Routes Group
 		admin := api.Group("/admin")
 		admin.Use(RequireAdminAuth())
 		{
-			// The frontend can hit this to check if the session is still active
-			admin.GET("/verify", func(c *gin.Context) {
-				c.JSON(http.StatusOK, gin.H{"message": "Session is valid"})
+			admin.GET("/verify", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"message": "Valid"}) })
+
+			admin.GET("/requests", func(c *gin.Context) {
+				var requests []Request
+				db.Where("status = ?", "Pending").Order("applied_on asc").Find(&requests)
+				c.JSON(http.StatusOK, requests)
+			})
+
+			admin.POST("/requests/:id/decline", func(c *gin.Context) {
+				reqID := c.Param("id")
+				var req Request
+				if err := db.First(&req, reqID).Error; err != nil {
+					c.JSON(http.StatusNotFound, gin.H{"error": "Request not found"})
+					return
+				}
+				req.Status = "Rejected"
+				if err := db.Save(&req).Error; err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decline"})
+					return
+				}
+				c.JSON(http.StatusOK, gin.H{"message": "Request declined successfully"})
+			})
+
+			// --- UPDATED: Accepts Username & Password for allocation ---
+			admin.POST("/requests/:id/allocate", func(c *gin.Context) {
+				reqID := c.Param("id")
+				var payload struct {
+					DeviceID  uint   `json:"deviceId"`
+					StartDate string `json:"startDate"`
+					Username  string `json:"username"`
+					Password  string `json:"password"`
+				}
+				if c.ShouldBindJSON(&payload) != nil { return }
+
+				var req Request
+				db.First(&req, reqID)
+				startDate, _ := time.Parse("2006-01-02", payload.StartDate)
+
+				db.Transaction(func(tx *gorm.DB) error {
+					endDate := startDate.AddDate(0, 0, req.NumberOfDays)
+					// Save the custom credentials to the allocation table
+					tx.Create(&Allocation{
+						RequestID: req.ID, 
+						DeviceID: payload.DeviceID, 
+						Username: payload.Username,
+						Password: payload.Password,
+						StartDate: startDate, 
+						EndDate: endDate,
+					})
+					req.Status = "Allocated"
+					tx.Save(&req)
+					return tx.Model(&Device{}).Where("id = ?", payload.DeviceID).Update("status", "Allocated").Error
+				})
+				c.JSON(http.StatusOK, gin.H{"message": "Allocated"})
+			})
+
+			// --- UPDATED: Sends Username & Password from DB ---
+			admin.GET("/allocations", func(c *gin.Context) {
+				type AllocationResult struct {
+					AllocationID uint      `json:"allocationId"`
+					DeviceID     uint      `json:"deviceId"`
+					FullName     string    `json:"fullName"`
+					SRN          string    `json:"srn"`
+					ResourceID   string    `json:"resourceId"`
+					GPUNumber    string    `json:"gpuNumber"`
+					Username     string    `json:"username"`
+					Password     string    `json:"password"`
+					StartDate    time.Time `json:"startDate"`
+					EndDate      time.Time `json:"endDate"`
+				}
+				
+				results := []AllocationResult{}
+				
+				db.Table("allocations").
+					Select("allocations.id as allocation_id, allocations.device_id, requests.full_name, requests.srn, devices.resource_id, devices.gpu_number, allocations.username, allocations.password, allocations.start_date, allocations.end_date").
+					Joins("left join requests on requests.id = allocations.request_id").
+					Joins("left join devices on devices.id = allocations.device_id").
+					Order("allocations.start_date desc").
+					Scan(&results)
+
+				c.JSON(http.StatusOK, results)
+			})
+
+			admin.POST("/gpus", func(c *gin.Context) {
+				var device Device
+				if c.ShouldBindJSON(&device) != nil { return }
+				db.Create(&device)
+				c.JSON(http.StatusCreated, device)
+			})
+
+			// --- Auto-healing GPU fetch endpoint ---
+			admin.GET("/gpus", func(c *gin.Context) {
+				var devices []Device
+				db.Find(&devices)
+
+				now := time.Now()
+
+				for i, dev := range devices {
+					if dev.Status == "Under Maintenance" {
+						continue
+					}
+
+					var activeAllocations int64
+					db.Model(&Allocation{}).
+						Where("device_id = ? AND start_date <= ? AND end_date >= ?", dev.ID, now, now).
+						Count(&activeAllocations)
+
+					if activeAllocations > 0 {
+						if dev.Status != "Allocated" {
+							db.Model(&dev).Update("status", "Allocated")
+							devices[i].Status = "Allocated"
+						}
+					} else {
+						if dev.Status == "Allocated" {
+							db.Model(&dev).Update("status", "Available")
+							devices[i].Status = "Available"
+						}
+					}
+				}
+
+				c.JSON(http.StatusOK, devices)
+			})
+
+			admin.PATCH("/gpus/:id", func(c *gin.Context) {
+				var payload map[string]interface{}
+				if c.ShouldBindJSON(&payload) != nil { return }
+				db.Model(&Device{}).Where("id = ?", c.Param("id")).Updates(payload)
+				c.JSON(http.StatusOK, gin.H{"message": "Updated"})
 			})
 		}
 	}
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	
-	log.Printf("Backend running on port %s", port)
-	r.Run(":" + port)
+	r.Run(":" + os.Getenv("PORT"))
 }
