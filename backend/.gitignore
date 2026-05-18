@@ -1,0 +1,34 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries, profiling, and coverage
+*.test
+*.out
+*.prof
+*.cgo1.go
+*.cgo2.c
+_cgo_defun.c
+_cgo_gotypes.go
+_cgo_export.*
+
+# Compiled Object files
+*.o
+*.a
+*.obj
+
+# Environment variables (Crucial to ignore so you don't leak passwords!)
+.env
+.env.*
+
+# Project specific
+ccf-backend
+main
+
+# IDEs and OS files
+.vscode/
+.idea/
+.DS_Store
