@@ -91,6 +91,8 @@ export default function Home() {
                   type="email"
                   className={inputStyles}
                   required
+                  pattern="^[a-zA-Z0-9._%+\-]+@kletech\.ac\.in$"
+                  title="Please enter a valid @kletech.ac.in email address"
                   placeholder="name@kletech.ac.in"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
@@ -112,6 +114,8 @@ export default function Home() {
                   type="text"
                   className={inputStyles}
                   required
+                  pattern="\d{6}"
+                  title="Please enter the 6-digit OTP"
                   placeholder="Enter 6-digit OTP"
                   value={otp}
                   onChange={(e) => setOtp(e.target.value)}
@@ -128,11 +132,29 @@ export default function Home() {
             <form onSubmit={handleSubmitRequest} className="space-y-4">
               <div className="space-y-2">
                 <label htmlFor="fullName" className={labelStyles}>Full Name</label>
-                <input id="fullName" className={inputStyles} required disabled={isLoading} value={formData.fullName} onChange={(e) => setFormData({ ...formData, fullName: e.target.value })} />
+                <input 
+                  id="fullName" 
+                  className={inputStyles} 
+                  required 
+                  disabled={isLoading}
+                  pattern="^[a-zA-Z\s]{2,50}$"
+                  title="Name must contain only letters and spaces (2-50 characters)"
+                  value={formData.fullName} 
+                  onChange={(e) => setFormData({ ...formData, fullName: e.target.value })} 
+                />
               </div>
               <div className="space-y-2">
                 <label htmlFor="srn" className={labelStyles}>SRN</label>
-                <input id="srn" className={inputStyles} required disabled={isLoading} value={formData.srn} onChange={(e) => setFormData({ ...formData, srn: e.target.value })} />
+                <input 
+                  id="srn" 
+                  className={inputStyles} 
+                  required 
+                  disabled={isLoading} 
+                  pattern="^[a-zA-Z0-9]{8,15}$"
+                  title="Enter a valid SRN (8-15 alphanumeric characters)"
+                  value={formData.srn} 
+                  onChange={(e) => setFormData({ ...formData, srn: e.target.value })} 
+                />
               </div>
               <div className="space-y-2">
                 <label htmlFor="department" className={labelStyles}>Department</label>
@@ -146,11 +168,31 @@ export default function Home() {
               </div>
               <div className="space-y-2">
                 <label htmlFor="contact" className={labelStyles}>Contact Number</label>
-                <input id="contact" type="tel" className={inputStyles} required disabled={isLoading} value={formData.contactNumber} onChange={(e) => setFormData({ ...formData, contactNumber: e.target.value })} />
+                <input 
+                  id="contact" 
+                  type="tel" 
+                  className={inputStyles} 
+                  required 
+                  disabled={isLoading} 
+                  pattern="^[6-9]\d{9}$"
+                  title="Enter a valid 10-digit Indian mobile number"
+                  value={formData.contactNumber} 
+                  onChange={(e) => setFormData({ ...formData, contactNumber: e.target.value })} 
+                />
               </div>
               <div className="space-y-2">
                 <label htmlFor="days" className={labelStyles}>Number of Days Required</label>
-                <input id="days" type="number" min="1" max="30" className={inputStyles} required disabled={isLoading} value={formData.numberOfDays} onChange={(e) => setFormData({ ...formData, numberOfDays: e.target.value })} />
+                <input 
+                  id="days" 
+                  type="number" 
+                  min="1" 
+                  max="30" 
+                  className={inputStyles} 
+                  required 
+                  disabled={isLoading} 
+                  value={formData.numberOfDays} 
+                  onChange={(e) => setFormData({ ...formData, numberOfDays: e.target.value })} 
+                />
               </div>
               <Button type="submit" className="w-full" disabled={isLoading}>
                  {isLoading ? "Submitting..." : "Submit Application"}

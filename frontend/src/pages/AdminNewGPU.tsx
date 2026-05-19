@@ -42,11 +42,25 @@ export default function AdminNewGPU() {
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <label className="text-sm font-medium">Resource ID (e.g., DGX-100)</label>
-                <input required className={inputStyles} value={formData.resourceId} onChange={(e) => setFormData({ ...formData, resourceId: e.target.value })} />
+                <input 
+                  required 
+                  className={inputStyles}
+                  pattern="^[a-zA-Z0-9\-_]+$"
+                  title="Only alphanumeric characters, hyphens, and underscores allowed" 
+                  value={formData.resourceId} 
+                  onChange={(e) => setFormData({ ...formData, resourceId: e.target.value })} 
+                />
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">GPU Number</label>
-                <input required className={inputStyles} value={formData.gpuNumber} onChange={(e) => setFormData({ ...formData, gpuNumber: e.target.value })} />
+                <input 
+                  required 
+                  type="number"
+                  min="1"
+                  className={inputStyles} 
+                  value={formData.gpuNumber} 
+                  onChange={(e) => setFormData({ ...formData, gpuNumber: e.target.value })} 
+                />
               </div>
             </div>
 
@@ -60,18 +74,36 @@ export default function AdminNewGPU() {
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">IP Address</label>
-                <input required className={inputStyles} value={formData.ipAddress} onChange={(e) => setFormData({ ...formData, ipAddress: e.target.value })} />
+                <input 
+                  required 
+                  className={inputStyles} 
+                  pattern="^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
+                  title="Enter a valid IPv4 address (e.g., 192.168.1.1)"
+                  value={formData.ipAddress} 
+                  onChange={(e) => setFormData({ ...formData, ipAddress: e.target.value })} 
+                />
               </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <label className="text-sm font-medium">Username</label>
-                <input required className={inputStyles} value={formData.username} onChange={(e) => setFormData({ ...formData, username: e.target.value })} />
+                <input 
+                  required 
+                  className={inputStyles} 
+                  value={formData.username} 
+                  onChange={(e) => setFormData({ ...formData, username: e.target.value })} 
+                />
               </div>
               <div className="space-y-2">
                 <label className="text-sm font-medium">Password</label>
-                <input type="password" required className={inputStyles} value={formData.password} onChange={(e) => setFormData({ ...formData, password: e.target.value })} />
+                <input 
+                  type="password" 
+                  required 
+                  className={inputStyles} 
+                  value={formData.password} 
+                  onChange={(e) => setFormData({ ...formData, password: e.target.value })} 
+                />
               </div>
             </div>
 
