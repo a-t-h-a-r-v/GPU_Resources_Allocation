@@ -8,9 +8,10 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/api";
 
 export default function AdminNewGPU() {
   const navigate = useNavigate();
+  // Changed gpuNumber to gpuCount to reflect total number
   const [formData, setFormData] = useState({
     resourceId: "",
-    gpuNumber: "",
+    gpuCount: "1", 
     resourceType: "Server",
     ipAddress: "",
     username: "",
@@ -20,11 +21,34 @@ export default function AdminNewGPU() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    const count = parseInt(formData.gpuCount, 10);
+    if (isNaN(count) || count < 1) {
+      alert("Please enter a valid number of GPUs");
+      return;
+    }
+
     try {
-      await axios.post(`${API_BASE_URL}/admin/gpus`, formData, { withCredentials: true });
+      // 1. Separate gpuCount from the rest of the payload
+      const { gpuCount, ...basePayload } = formData;
+      
+      // 2. Create an array of POST requests for GPU 1 to N
+      const requests = Array.from({ length: count }, (_, i) => {
+        const gpuNumberString = (i + 1).toString();
+        
+        return axios.post(`${API_BASE_URL}/admin/gpus`, {
+          ...basePayload,
+          gpuNumber: gpuNumberString // Assigns 1, 2, 3... automatically
+        }, { withCredentials: true });
+      });
+
+      // 3. Execute all requests concurrently
+      await Promise.all(requests);
+      
       navigate("/admin/gpus");
     } catch (error) {
-      alert("Failed to create device. Check console for details.");
+      console.error(error);
+      alert("Failed to create devices. Check console for details.");
     }
   };
 
@@ -52,14 +76,15 @@ export default function AdminNewGPU() {
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium">GPU Number</label>
+                {/* Updated Label to clarify intent */}
+                <label className="text-sm font-medium">Total Number of GPUs</label>
                 <input 
                   required 
                   type="number"
                   min="1"
                   className={inputStyles} 
-                  value={formData.gpuNumber} 
-                  onChange={(e) => setFormData({ ...formData, gpuNumber: e.target.value })} 
+                  value={formData.gpuCount} 
+                  onChange={(e) => setFormData({ ...formData, gpuCount: e.target.value })} 
                 />
               </div>
             </div>
@@ -118,7 +143,7 @@ export default function AdminNewGPU() {
               <label htmlFor="active" className="text-sm font-medium cursor-pointer">Credential Active</label>
             </div>
 
-            <Button type="submit" className="w-full mt-4">Create GPU</Button>
+            <Button type="submit" className="w-full mt-4">Create GPUs</Button>
           </form>
         </CardContent>
       </Card>

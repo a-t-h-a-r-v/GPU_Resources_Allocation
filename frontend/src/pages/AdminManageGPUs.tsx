@@ -81,9 +81,14 @@ export default function AdminManageGPUs() {
     }
   }, [activeTab, devices]);
 
-  const displayDevices = tabDevices.filter(d => d.resourceId === selectedResourceId);
-  const serverCount = devices.filter(d => d.resourceType === "Server").length;
-  const workstationCount = devices.filter(d => d.resourceType === "Workstation").length;
+  const displayDevices = tabDevices
+    .filter(d => d.resourceId === selectedResourceId)
+    .sort((a, b) => Number(a.gpuNumber) - Number(b.gpuNumber));
+
+  // Use a Set to count unique resourceIds instead of counting every individual GPU
+  const serverCount = new Set(devices.filter(d => d.resourceType === "Server").map(d => d.resourceId)).size;
+  const workstationCount = new Set(devices.filter(d => d.resourceType === "Workstation").map(d => d.resourceId)).size;
+
   const inputStyles = "flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm";
 
   // Simple Eye SVG Icons
