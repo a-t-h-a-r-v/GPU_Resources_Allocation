@@ -20,8 +20,17 @@ export default function AdminRequests() {
   
   const [deviceId, setDeviceId] = useState("");
   const [startDate, setStartDate] = useState(getLocalDateString(new Date()));
-  const [username, setUsername] = useState(""); // NEW
-  const [password, setPassword] = useState(""); // NEW
+  const [username, setUsername] = useState(""); 
+  const [password, setPassword] = useState(""); 
+  
+  // NEW: Allocation modifier states
+  const [allocatedDays, setAllocatedDays] = useState<number>(0);
+  const [reductionReason, setReductionReason] = useState("");
+  const [emailNote, setEmailNote] = useState("");
+
+  // NEW: Decline modal states
+  const [declineReq, setDeclineReq] = useState<any | null>(null);
+  const [declineReason, setDeclineReason] = useState("");
 
   const fetchData = async () => {
     try {
@@ -42,10 +51,26 @@ export default function AdminRequests() {
     fetchData();
   }, []);
 
-  const handleDecline = async (id: number) => {
-    if (!window.confirm("Are you sure you want to decline this request?")) return;
+  // Sync selected request data to allocation modifiers
+  useEffect(() => {
+    if (selectedReq) {
+      setAllocatedDays(selectedReq.numberOfDays);
+      setReductionReason("");
+      setEmailNote("");
+    }
+  }, [selectedReq]);
+
+  const handleDeclineSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!declineReq) return;
     try {
-      await axios.post(`${API_BASE_URL}/admin/requests/${id}/decline`, {}, { withCredentials: true });
+      await axios.post(
+        `${API_BASE_URL}/admin/requests/${declineReq.id}/decline`, 
+        { reason: declineReason }, 
+        { withCredentials: true }
+      );
+      setDeclineReq(null);
+      setDeclineReason("");
       fetchData();
     } catch (err) {
       alert("Failed to decline request.");
@@ -61,11 +86,11 @@ export default function AdminRequests() {
   }, [devices]);
 
   const { availableDevices, calculatedEndDate } = useMemo(() => {
-    if (!selectedReq || !startDate) return { availableDevices: [], calculatedEndDate: "" };
+    if (!selectedReq || !startDate || !allocatedDays) return { availableDevices: [], calculatedEndDate: "" };
 
     const reqStart = new Date(startDate);
     const reqEnd = new Date(startDate);
-    reqEnd.setDate(reqEnd.getDate() + selectedReq.numberOfDays);
+    reqEnd.setDate(reqEnd.getDate() + allocatedDays);
 
     const available = devices.filter((device) => {
       if (device.status === "Under Maintenance") return false;
@@ -79,7 +104,7 @@ export default function AdminRequests() {
     });
 
     return { availableDevices: available, calculatedEndDate: getLocalDateString(reqEnd) };
-  }, [selectedReq, startDate, devices, allocations]);
+  }, [selectedReq, startDate, allocatedDays, devices, allocations]);
 
   useEffect(() => {
     if (deviceId && !availableDevices.find(d => d.id.toString() === deviceId)) {
@@ -96,6 +121,9 @@ export default function AdminRequests() {
         { 
           deviceId: parseInt(deviceId), 
           startDate, 
+          allocatedDays,
+          reductionReason,
+          emailNote,
           username, 
           password 
         },
@@ -183,7 +211,7 @@ export default function AdminRequests() {
                       </div>
                     </div>
                     <span className="text-xs bg-primary/10 text-primary px-2.5 py-1 rounded-full font-bold whitespace-nowrap">
-                      {req.numberOfDays} Days
+                      {req.numberOfDays} Days Requested
                     </span>
                   </div>
                 </CardHeader>
@@ -209,7 +237,7 @@ export default function AdminRequests() {
                 
                 <div className="p-4 pt-0 mt-auto flex gap-2">
                   <Button onClick={() => setSelectedReq(req)} className="w-2/3">Review & Allocate</Button>
-                  <Button onClick={() => handleDecline(req.id)} variant="outline" className="w-1/3 text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700">Decline</Button>
+                  <Button onClick={() => setDeclineReq(req)} variant="outline" className="w-1/3 text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700">Decline</Button>
                 </div>
               </Card>
             ))}
@@ -217,28 +245,36 @@ export default function AdminRequests() {
         )}
       </section>
 
-      {/* 3. SMART ALLOCATION MODAL (WITH CREDENTIALS) */}
+      {/* 3. SMART ALLOCATION MODAL */}
       {selectedReq && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-          <Card className="w-full max-w-md shadow-xl bg-background max-h-[90vh] flex flex-col">
+          <Card className="w-full max-w-lg shadow-xl bg-background max-h-[95vh] flex flex-col">
             <CardHeader className="border-b mb-4 shrink-0">
               <CardTitle>Allocate Resources</CardTitle>
               <p className="text-sm text-muted-foreground">
-                For <strong>{selectedReq.fullName}</strong> ({selectedReq.numberOfDays} days)
+                For <strong>{selectedReq.fullName}</strong> (Requested: {selectedReq.numberOfDays} days)
               </p>
             </CardHeader>
             <CardContent className="overflow-y-auto flex-grow">
               <form onSubmit={handleAllocate} className="space-y-4">
+                
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <label className="text-sm font-medium">Start Date</label>
                     <input type="date" required min={getLocalDateString(new Date())} className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
                   </div>
-                  <div className="space-y-2 opacity-70">
-                    <label className="text-sm font-medium">Auto End Date</label>
-                    <input type="date" disabled className="flex h-10 w-full rounded-md border border-input bg-muted px-3 py-2 text-sm cursor-not-allowed" value={calculatedEndDate} />
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-amber-600">Allocate Days</label>
+                    <input type="number" required min={1} max={selectedReq.numberOfDays} className="flex h-10 w-full rounded-md border border-amber-300 bg-amber-50/50 px-3 py-2 text-sm" value={allocatedDays} onChange={(e) => setAllocatedDays(parseInt(e.target.value) || 0)} />
                   </div>
                 </div>
+
+                {allocatedDays < selectedReq.numberOfDays && (
+                  <div className="space-y-2 p-3 bg-amber-50 border border-amber-200 rounded-md">
+                    <label className="text-sm font-medium text-amber-800">Reason for Duration Reduction <span className="text-red-500">*</span></label>
+                    <input type="text" required placeholder="e.g., High demand for GPUs right now" className="flex h-10 w-full rounded-md border border-amber-300 bg-background px-3 py-2 text-sm" value={reductionReason} onChange={(e) => setReductionReason(e.target.value)} />
+                  </div>
+                )}
 
                 <div className="space-y-2">
                   <label className="text-sm font-medium flex justify-between">
@@ -247,7 +283,7 @@ export default function AdminRequests() {
                   </label>
                   {availableDevices.length === 0 ? (
                     <div className="text-sm text-red-600 bg-red-50 p-3 rounded-md border border-red-200">
-                      No GPUs are available for this specific date range. Please try changing the start date.
+                      No GPUs are available for this specific date range.
                     </div>
                   ) : (
                     <select className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" required value={deviceId} onChange={(e) => setDeviceId(e.target.value)}>
@@ -259,32 +295,26 @@ export default function AdminRequests() {
                   )}
                 </div>
 
-                {/* --- NEW: CREDENTIAL ASSIGNMENT --- */}
                 <div className="grid grid-cols-2 gap-4 pt-2">
                   <div className="space-y-2">
                     <label className="text-sm font-medium text-blue-600">Assign Username</label>
-                    <input 
-                      type="text" 
-                      required 
-                      placeholder="e.g., student01" 
-                      className="flex h-10 w-full rounded-md border border-input bg-blue-50/50 px-3 py-2 text-sm" 
-                      value={username} 
-                      onChange={(e) => setUsername(e.target.value)} 
-                    />
+                    <input type="text" required placeholder="e.g., student01" className="flex h-10 w-full rounded-md border border-input bg-blue-50/50 px-3 py-2 text-sm" value={username} onChange={(e) => setUsername(e.target.value)} />
                   </div>
                   <div className="space-y-2">
                     <label className="text-sm font-medium text-blue-600">Assign Password</label>
-                    <input 
-                      type="text" 
-                      required 
-                      placeholder="••••••••" 
-                      className="flex h-10 w-full rounded-md border border-input bg-blue-50/50 px-3 py-2 text-sm" 
-                      value={password} 
-                      onChange={(e) => setPassword(e.target.value)} 
-                    />
+                    <input type="text" required placeholder="••••••••" className="flex h-10 w-full rounded-md border border-input bg-blue-50/50 px-3 py-2 text-sm" value={password} onChange={(e) => setPassword(e.target.value)} />
                   </div>
                 </div>
-                <p className="text-[11px] text-muted-foreground mt-0 leading-tight">These credentials will be assigned to the student for the duration of this specific allocation.</p>
+
+                <div className="space-y-2 pt-2">
+                  <label className="text-sm font-medium">Custom Email Note (Optional)</label>
+                  <textarea 
+                    placeholder="Add custom instructions or remarks to the approval email..." 
+                    className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm" 
+                    value={emailNote} 
+                    onChange={(e) => setEmailNote(e.target.value)} 
+                  />
+                </div>
 
                 <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
                   <Button type="button" variant="ghost" onClick={() => setSelectedReq(null)}>Cancel</Button>
@@ -296,7 +326,40 @@ export default function AdminRequests() {
         </div>
       )}
 
-      {/* 4. GPU CALENDAR TIMELINE MODAL */}
+      {/* 4. DECLINE REASON MODAL */}
+      {declineReq && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <Card className="w-full max-w-md shadow-xl bg-background">
+            <CardHeader className="border-b mb-4">
+              <CardTitle className="text-red-600">Decline Request</CardTitle>
+              <p className="text-sm text-muted-foreground">
+                Declining request for <strong>{declineReq.fullName}</strong>
+              </p>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handleDeclineSubmit} className="space-y-4">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Reason for Declination <span className="text-red-500">*</span></label>
+                  <textarea 
+                    required 
+                    placeholder="Explain why the request is being declined..." 
+                    className="flex min-h-[100px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm" 
+                    value={declineReason} 
+                    onChange={(e) => setDeclineReason(e.target.value)} 
+                  />
+                  <p className="text-[11px] text-muted-foreground">This reason will be emailed to the student.</p>
+                </div>
+                <div className="flex justify-end gap-3 mt-6">
+                  <Button type="button" variant="ghost" onClick={() => setDeclineReq(null)}>Cancel</Button>
+                  <Button type="submit" variant="destructive">Confirm Decline</Button>
+                </div>
+              </form>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* 5. GPU CALENDAR TIMELINE MODAL */}
       {calendarDevice && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
           <Card className="w-full max-w-lg shadow-xl bg-background max-h-[80vh] flex flex-col">

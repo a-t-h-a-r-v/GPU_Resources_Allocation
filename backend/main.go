@@ -20,7 +20,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/joho/godotenv"
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
@@ -72,7 +71,7 @@ var mu sync.Mutex
 
 // --- Email Queue (Worker Pool Pattern) ---
 type EmailJob struct {
-	To, FullName, ResourceID, GPUNumber, IPAddress, Username, Password, StartDate, EndDate string
+	Type, To, FullName, ResourceID, GPUNumber, IPAddress, Username, Password, StartDate, EndDate, CustomNote, Reason string
 }
 
 var emailQueue = make(chan EmailJob, 100)
@@ -134,7 +133,11 @@ func decryptAES(ciphertextHex string, keyString string) (string, error) {
 func startEmailWorker() {
 	go func() {
 		for job := range emailQueue {
-			sendAllocationEmail(job.To, job.FullName, job.ResourceID, job.GPUNumber, job.IPAddress, job.Username, job.Password, job.StartDate, job.EndDate)
+			if job.Type == "ALLOCATION" {
+				sendAllocationEmail(job.To, job.FullName, job.ResourceID, job.GPUNumber, job.IPAddress, job.Username, job.Password, job.StartDate, job.EndDate, job.CustomNote, job.Reason)
+			} else if job.Type == "DECLINE" {
+				sendDeclineEmail(job.To, job.FullName, job.Reason)
+			}
 		}
 	}()
 }
@@ -230,15 +233,22 @@ func sendOTPEmail(to, otp string) error {
 	return smtp.SendMail(host+":"+port, auth, from, []string{to}, msg)
 }
 
-func sendAllocationEmail(to, fullName, resourceId, gpuNumber, ipAddress, username, password, startDate, endDate string) error {
+// Update the sendAllocationEmail function to accept new parameters
+func sendAllocationEmail(to, fullName, resourceId, gpuNumber, ipAddress, username, password, startDate, endDate, customNote, reductionReason string) error {
 	from := os.Getenv("SMTP_EMAIL")
 	smtpPassword := os.Getenv("SMTP_PASSWORD")
 	host := os.Getenv("SMTP_HOST")
 	port := os.Getenv("SMTP_PORT")
 
 	subject := "Subject: CCF GPU Portal - Resource Allocation Details\r\n"
-	body := fmt.Sprintf("Dear %s,\r\n\r\nYour request for GPU resources has been approved and allocated.\r\n\r\n"+
-		"Allocation Details:\r\n"+
+
+	body := fmt.Sprintf("Dear %s,\r\n\r\nYour request for GPU resources has been approved and allocated.\r\n", fullName)
+
+	if reductionReason != "" {
+		body += fmt.Sprintf("\r\nNOTE REGARDING DURATION: Your requested duration was reduced. Reason: %s\r\n", reductionReason)
+	}
+
+	body += fmt.Sprintf("\r\nAllocation Details:\r\n"+
 		"- Resource ID: %s\r\n"+
 		"- GPU Number: %s\r\n"+
 		"- Start Date: %s\r\n"+
@@ -246,14 +256,45 @@ func sendAllocationEmail(to, fullName, resourceId, gpuNumber, ipAddress, usernam
 		"Login Credentials:\r\n"+
 		"- IP Address: %s\r\n"+
 		"- Username: %s\r\n"+
-		"- Password: %s\r\n\r\n"+
-		"Please ensure you follow the acceptable use policy.\r\n\r\nRegards,\r\nAdmin Team\r\n",
-		fullName, resourceId, gpuNumber, startDate, endDate, ipAddress, username, password)
+		"- Password: %s\r\n",
+		resourceId, gpuNumber, startDate, endDate, ipAddress, username, password)
 
+	if customNote != "" {
+		body += fmt.Sprintf("\r\nAdmin Note:\r\n%s\r\n", customNote)
+	}
+
+	body += "\r\nPlease ensure you follow the acceptable use policy.\r\n\r\nRegards,\r\nAdmin Team\r\n"
+
+	// ... rest of your sendAllocationEmail logic (the DEV MODE print and smtp.SendMail part) ...
+    // (keep the rest of the function exactly the same)
 	if from == "" || smtpPassword == "" {
 		log.Printf("\n======================================================")
 		log.Printf("⚠️ LOCAL DEV MODE: No SMTP credentials found.")
 		log.Printf("📧 Simulated Allocation Email to: %s", to)
+		log.Printf("Message:\n%s", body)
+		log.Printf("======================================================\n")
+		return nil
+	}
+
+	auth := smtp.PlainAuth("", from, smtpPassword, host)
+	msg := []byte("To: " + to + "\r\n" + subject + "\r\n" + body)
+	return smtp.SendMail(host+":"+port, auth, from, []string{to}, msg)
+}
+
+// Add the new Decline Email function
+func sendDeclineEmail(to, fullName, reason string) error {
+	from := os.Getenv("SMTP_EMAIL")
+	smtpPassword := os.Getenv("SMTP_PASSWORD")
+	host := os.Getenv("SMTP_HOST")
+	port := os.Getenv("SMTP_PORT")
+
+	subject := "Subject: CCF GPU Portal - Request Declined\r\n"
+	body := fmt.Sprintf("Dear %s,\r\n\r\nWe regret to inform you that your request for GPU resources has been declined.\r\n\r\nReason provided by Admin:\r\n%s\r\n\r\nIf you have any questions, please contact the administration.\r\n\r\nRegards,\r\nAdmin Team\r\n", fullName, reason)
+
+	if from == "" || smtpPassword == "" {
+		log.Printf("\n======================================================")
+		log.Printf("⚠️ LOCAL DEV MODE: No SMTP credentials found.")
+		log.Printf("📧 Simulated Decline Email to: %s", to)
 		log.Printf("Message:\n%s", body)
 		log.Printf("======================================================\n")
 		return nil
@@ -427,6 +468,15 @@ func main() {
 
 			admin.POST("/requests/:id/decline", func(c *gin.Context) {
 				reqID := c.Param("id")
+
+				var payload struct {
+					Reason string `json:"reason"`
+				}
+				if err := c.ShouldBindJSON(&payload); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload format"})
+					return
+				}
+
 				var req Request
 				if err := db.First(&req, reqID).Error; err != nil {
 					c.JSON(http.StatusNotFound, gin.H{"error": "Request not found"})
@@ -437,18 +487,30 @@ func main() {
 					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decline"})
 					return
 				}
+
+				// Trigger Async email queue
+				emailQueue <- EmailJob{
+					Type:     "DECLINE",
+					To:       req.Email,
+					FullName: req.FullName,
+					Reason:   payload.Reason,
+				}
+
 				c.JSON(http.StatusOK, gin.H{"message": "Request declined successfully"})
 			})
 
 			admin.POST("/requests/:id/allocate", func(c *gin.Context) {
 				reqID := c.Param("id")
 				var payload struct {
-					DeviceID  uint   `json:"deviceId"`
-					StartDate string `json:"startDate"`
-					Username  string `json:"username"`
-					Password  string `json:"password"`
+					DeviceID        uint   `json:"deviceId"`
+					StartDate       string `json:"startDate"`
+					AllocatedDays   int    `json:"allocatedDays"`
+					ReductionReason string `json:"reductionReason"`
+					EmailNote       string `json:"emailNote"`
+					Username        string `json:"username"`
+					Password        string `json:"password"`
 				}
-				
+
 				if err := c.ShouldBindJSON(&payload); err != nil {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload format"})
 					return
@@ -471,21 +533,22 @@ func main() {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid date format. Expected YYYY-MM-DD"})
 					return
 				}
-				endDate := startDate.AddDate(0, 0, req.NumberOfDays)
+
+				// Apply the Custom Allocated Days instead of req.NumberOfDays
+				endDate := startDate.AddDate(0, 0, payload.AllocatedDays)
 
 				err = db.Transaction(func(tx *gorm.DB) error {
-					// Hash the password for storage
-					hashedPassword, err := bcrypt.GenerateFromPassword([]byte(payload.Password), bcrypt.DefaultCost)
+					// INSTEAD of bcrypt, ENCRYPT with AES so admins can read it later
+					encryptedPassword, err := encryptAES(payload.Password, os.Getenv("ENCRYPTION_KEY"))
 					if err != nil {
 						return err
 					}
 
-					// Use `tx` strictly for all operations in the transaction to allow rollback
 					if err := tx.Create(&Allocation{
 						RequestID: req.ID,
 						DeviceID:  payload.DeviceID,
 						Username:  payload.Username,
-						Password:  string(hashedPassword),
+						Password:  encryptedPassword,
 						StartDate: startDate,
 						EndDate:   endDate,
 					}).Error; err != nil {
@@ -507,15 +570,18 @@ func main() {
 
 				// Enqueue async email
 				emailQueue <- EmailJob{
+					Type:       "ALLOCATION",
 					To:         req.Email,
 					FullName:   req.FullName,
 					ResourceID: device.ResourceID,
 					GPUNumber:  device.GPUNumber,
 					IPAddress:  device.IPAddress,
 					Username:   payload.Username,
-					Password:   payload.Password,
+					Password:   payload.Password, // Give plain password to email job
 					StartDate:  startDate.Format("2006-01-02"),
 					EndDate:    endDate.Format("2006-01-02"),
+					CustomNote: payload.EmailNote,
+					Reason:     payload.ReductionReason,
 				}
 
 				c.JSON(http.StatusOK, gin.H{"message": "Allocated"})
@@ -537,12 +603,27 @@ func main() {
 
 				results := []AllocationResult{}
 
+				// Note: Fetching actual allocations.password instead of hardcoding '********'
 				db.Table("allocations").
-					Select("allocations.id as allocation_id, allocations.device_id, requests.full_name, requests.srn, devices.resource_id, devices.gpu_number, allocations.username, '********' as password, allocations.start_date, allocations.end_date").
+					Select("allocations.id as allocation_id, allocations.device_id, requests.full_name, requests.srn, devices.resource_id, devices.gpu_number, allocations.username, allocations.password, allocations.start_date, allocations.end_date").
 					Joins("left join requests on requests.id = allocations.request_id").
 					Joins("left join devices on devices.id = allocations.device_id").
 					Order("allocations.start_date desc").
 					Scan(&results)
+
+				// Decrypt the passwords so Admin can see them
+				encryptionKey := os.Getenv("ENCRYPTION_KEY")
+				for i := range results {
+					if results[i].Password != "" {
+						// Attempt decrypt. Note: old allocations hashed with bcrypt will show "Error decrypting"
+						decryptedPass, err := decryptAES(results[i].Password, encryptionKey)
+						if err == nil {
+							results[i].Password = decryptedPass
+						} else {
+							results[i].Password = "Error decrypting (bcrypt legacy)"
+						}
+					}
+				}
 
 				c.JSON(http.StatusOK, results)
 			})
