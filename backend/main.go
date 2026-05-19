@@ -1,10 +1,11 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/subtle"
 	"fmt"
 	"log"
-	"math/rand"
+	"math/big"
 	"net/http"
 	"net/smtp"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/joho/godotenv"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
@@ -47,14 +49,36 @@ type Allocation struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	RequestID uint      `json:"requestId"`
 	DeviceID  uint      `json:"deviceId"`
-	Username  string    `json:"username"` // NEW: Allocation specific username
-	Password  string    `json:"password"` // NEW: Allocation specific password
+	Username  string    `json:"username"`
+	Password  string    `json:"password"` // Stored as bcrypt hash
 	StartDate time.Time `json:"startDate"`
 	EndDate   time.Time `json:"endDate"`
 }
 
-var otpStore = make(map[string]string)
+// --- OTP & Concurrency Data ---
+type OTPData struct {
+	Code      string
+	ExpiresAt time.Time
+	Attempts  int
+}
+
+var otpStore = make(map[string]OTPData)
 var mu sync.Mutex
+
+// --- Email Queue (Worker Pool Pattern) ---
+type EmailJob struct {
+	To, FullName, ResourceID, GPUNumber, IPAddress, Username, Password, StartDate, EndDate string
+}
+
+var emailQueue = make(chan EmailJob, 100)
+
+func startEmailWorker() {
+	go func() {
+		for job := range emailQueue {
+			sendAllocationEmail(job.To, job.FullName, job.ResourceID, job.GPUNumber, job.IPAddress, job.Username, job.Password, job.StartDate, job.EndDate)
+		}
+	}()
+}
 
 // --- Database Setup ---
 func initDB() *gorm.DB {
@@ -69,7 +93,6 @@ func initDB() *gorm.DB {
 	var db *gorm.DB
 	var err error
 
-	// NEW: Smart retry loop to handle Docker's race condition
 	for i := 1; i <= 10; i++ {
 		db, err = gorm.Open(mysql.Open(dsn), &gorm.Config{})
 		if err == nil {
@@ -84,7 +107,6 @@ func initDB() *gorm.DB {
 		log.Fatalf("❌ Failed to connect to database after 10 attempts: %v", err)
 	}
 
-	// AutoMigrate creates the tables automatically
 	log.Println("⚙️ Running AutoMigrate...")
 	err = db.AutoMigrate(&Request{}, &Device{}, &Allocation{})
 	if err != nil {
@@ -92,6 +114,41 @@ func initDB() *gorm.DB {
 	}
 
 	return db
+}
+
+// --- Background Job: Auto-Heal GPU Status ---
+func startGPUHealer(db *gorm.DB) {
+	ticker := time.NewTicker(5 * time.Minute)
+	go func() {
+		for range ticker.C {
+			var devices []Device
+			db.Find(&devices)
+			now := time.Now()
+
+			for _, dev := range devices {
+				if dev.Status == "Under Maintenance" {
+					continue
+				}
+
+				var activeAllocations int64
+				db.Model(&Allocation{}).
+					Where("device_id = ? AND start_date <= ? AND end_date >= ?", dev.ID, now, now).
+					Count(&activeAllocations)
+
+				if activeAllocations > 0 && dev.Status != "Allocated" {
+					db.Model(&dev).Update("status", "Allocated")
+				} else if activeAllocations == 0 && dev.Status == "Allocated" {
+					db.Model(&dev).Update("status", "Available")
+				}
+			}
+		}
+	}()
+}
+
+// --- Cryptographically Secure OTP Generator ---
+func generateSecureOTP() string {
+	n, _ := rand.Int(rand.Reader, big.NewInt(1000000))
+	return fmt.Sprintf("%06d", n.Int64())
 }
 
 func sendOTPEmail(to, otp string) error {
@@ -114,8 +171,7 @@ func sendOTPEmail(to, otp string) error {
 	return smtp.SendMail(host+":"+port, auth, from, []string{to}, msg)
 }
 
-// --- NEW: Function to send Allocation Details Email ---
-func sendAllocationEmail(to, fullName, resourceId, gpuNumber, username, password, startDate, endDate string) error {
+func sendAllocationEmail(to, fullName, resourceId, gpuNumber, ipAddress, username, password, startDate, endDate string) error {
 	from := os.Getenv("SMTP_EMAIL")
 	smtpPassword := os.Getenv("SMTP_PASSWORD")
 	host := os.Getenv("SMTP_HOST")
@@ -129,10 +185,11 @@ func sendAllocationEmail(to, fullName, resourceId, gpuNumber, username, password
 		"- Start Date: %s\r\n"+
 		"- End Date: %s\r\n\r\n"+
 		"Login Credentials:\r\n"+
+		"- IP Address: %s\r\n"+
 		"- Username: %s\r\n"+
 		"- Password: %s\r\n\r\n"+
 		"Please ensure you follow the acceptable use policy.\r\n\r\nRegards,\r\nAdmin Team\r\n",
-		fullName, resourceId, gpuNumber, startDate, endDate, username, password)
+		fullName, resourceId, gpuNumber, startDate, endDate, ipAddress, username, password)
 
 	if from == "" || smtpPassword == "" {
 		log.Printf("\n======================================================")
@@ -175,10 +232,24 @@ func main() {
 	_ = godotenv.Load()
 
 	db := initDB()
+	startGPUHealer(db) // Start background worker
+	startEmailWorker() // Start async email queue
+
 	r := gin.Default()
 
+	// Strict CORS
 	r.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", c.Request.Header.Get("Origin"))
+		origin := c.Request.Header.Get("Origin")
+		allowedOrigins := map[string]bool{
+			"http://localhost":      true,
+			"http://localhost:80":   true,
+			"http://localhost:5173": true,
+		}
+
+		if allowedOrigins[origin] {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+		}
+		
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE, PATCH")
@@ -192,43 +263,78 @@ func main() {
 	api := r.Group("/api")
 	{
 		api.POST("/auth/otp/send", func(c *gin.Context) {
-			var req struct{ Email string `json:"email" binding:"required"` }
-			if c.ShouldBindJSON(&req) != nil { return }
-			otp := fmt.Sprintf("%06d", rand.Intn(1000000))
+			var req struct {
+				Email string `json:"email" binding:"required"`
+			}
+			if err := c.ShouldBindJSON(&req); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			otp := generateSecureOTP()
+			
 			mu.Lock()
-			otpStore[req.Email] = otp
+			otpStore[req.Email] = OTPData{
+				Code:      otp,
+				ExpiresAt: time.Now().Add(5 * time.Minute), // Expires in 5 minutes
+				Attempts:  0,
+			}
 			mu.Unlock()
+
 			sendOTPEmail(req.Email, otp)
 			c.JSON(http.StatusOK, gin.H{"message": "OTP sent successfully"})
 		})
 
 		api.POST("/auth/otp/verify", func(c *gin.Context) {
 			var req struct{ Email, OTP string }
-			if c.ShouldBindJSON(&req) != nil { return }
+			if err := c.ShouldBindJSON(&req); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+				return
+			}
+
 			mu.Lock()
+			defer mu.Unlock() // Ensure lock is released even on early return
+
 			storedOTP, exists := otpStore[req.Email]
-			mu.Unlock()
-			if !exists || storedOTP != req.OTP {
+			if !exists || time.Now().After(storedOTP.ExpiresAt) {
+				delete(otpStore, req.Email)
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "OTP expired or not found"})
+				return
+			}
+
+			if storedOTP.Attempts >= 3 {
+				delete(otpStore, req.Email)
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Too many failed attempts. Request a new OTP."})
+				return
+			}
+
+			if storedOTP.Code != req.OTP {
+				storedOTP.Attempts++
+				otpStore[req.Email] = storedOTP
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid OTP"})
 				return
 			}
-			mu.Lock()
-			delete(otpStore, req.Email)
-			mu.Unlock()
+
+			delete(otpStore, req.Email) // Success, clear state
 			c.JSON(http.StatusOK, gin.H{"message": "OTP verified"})
 		})
 
 		api.POST("/requests", func(c *gin.Context) {
 			var form Request
-			if c.ShouldBindJSON(&form) != nil { return }
+			if err := c.ShouldBindJSON(&form); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload format"})
+				return
+			}
 			db.Create(&form)
 			c.JSON(http.StatusCreated, gin.H{"message": "Saved"})
 		})
 
 		api.POST("/admin/login", func(c *gin.Context) {
 			var req struct{ Username, Password string }
-			time.Sleep(500 * time.Millisecond)
-			if c.ShouldBindJSON(&req) != nil { return }
+			time.Sleep(500 * time.Millisecond) // Throttling
+			if err := c.ShouldBindJSON(&req); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload format"})
+				return
+			}
 
 			if subtle.ConstantTimeCompare([]byte(req.Username), []byte(os.Getenv("ADMIN_USERNAME"))) != 1 ||
 				subtle.ConstantTimeCompare([]byte(req.Password), []byte(os.Getenv("ADMIN_PASSWORD"))) != 1 {
@@ -275,7 +381,6 @@ func main() {
 				c.JSON(http.StatusOK, gin.H{"message": "Request declined successfully"})
 			})
 
-			// --- UPDATED: Accepts Username & Password and sends email ---
 			admin.POST("/requests/:id/allocate", func(c *gin.Context) {
 				reqID := c.Param("id")
 				var payload struct {
@@ -284,7 +389,11 @@ func main() {
 					Username  string `json:"username"`
 					Password  string `json:"password"`
 				}
-				if c.ShouldBindJSON(&payload) != nil { return }
+				
+				if err := c.ShouldBindJSON(&payload); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload format"})
+					return
+				}
 
 				var req Request
 				if err := db.First(&req, reqID).Error; err != nil {
@@ -292,34 +401,43 @@ func main() {
 					return
 				}
 
-				// Fetch device details needed for the email
 				var device Device
 				if err := db.First(&device, payload.DeviceID).Error; err != nil {
 					c.JSON(http.StatusNotFound, gin.H{"error": "Device not found"})
 					return
 				}
 
-				startDate, _ := time.Parse("2006-01-02", payload.StartDate)
+				startDate, err := time.Parse("2006-01-02", payload.StartDate)
+				if err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid date format. Expected YYYY-MM-DD"})
+					return
+				}
 				endDate := startDate.AddDate(0, 0, req.NumberOfDays)
 
-				err := db.Transaction(func(tx *gorm.DB) error {
-					// Save the custom credentials to the allocation table
+				err = db.Transaction(func(tx *gorm.DB) error {
+					// Hash the password for storage
+					hashedPassword, err := bcrypt.GenerateFromPassword([]byte(payload.Password), bcrypt.DefaultCost)
+					if err != nil {
+						return err
+					}
+
+					// Use `tx` strictly for all operations in the transaction to allow rollback
 					if err := tx.Create(&Allocation{
-						RequestID: req.ID, 
-						DeviceID:  payload.DeviceID, 
+						RequestID: req.ID,
+						DeviceID:  payload.DeviceID,
 						Username:  payload.Username,
-						Password:  payload.Password,
-						StartDate: startDate, 
+						Password:  string(hashedPassword),
+						StartDate: startDate,
 						EndDate:   endDate,
 					}).Error; err != nil {
 						return err
 					}
-					
+
 					req.Status = "Allocated"
 					if err := tx.Save(&req).Error; err != nil {
 						return err
 					}
-					
+
 					return tx.Model(&Device{}).Where("id = ?", payload.DeviceID).Update("status", "Allocated").Error
 				})
 
@@ -328,22 +446,22 @@ func main() {
 					return
 				}
 
-				// Trigger email asynchronously to avoid blocking the HTTP response
-				go sendAllocationEmail(
-					req.Email,
-					req.FullName,
-					device.ResourceID,
-					device.GPUNumber,
-					payload.Username,
-					payload.Password,
-					startDate.Format("2006-01-02"),
-					endDate.Format("2006-01-02"),
-				)
+				// Enqueue async email
+				emailQueue <- EmailJob{
+					To:         req.Email,
+					FullName:   req.FullName,
+					ResourceID: device.ResourceID,
+					GPUNumber:  device.GPUNumber,
+					IPAddress:  device.IPAddress,
+					Username:   payload.Username,
+					Password:   payload.Password,
+					StartDate:  startDate.Format("2006-01-02"),
+					EndDate:    endDate.Format("2006-01-02"),
+				}
 
 				c.JSON(http.StatusOK, gin.H{"message": "Allocated"})
 			})
 
-			// --- UPDATED: Sends Username & Password from DB ---
 			admin.GET("/allocations", func(c *gin.Context) {
 				type AllocationResult struct {
 					AllocationID uint      `json:"allocationId"`
@@ -357,11 +475,11 @@ func main() {
 					StartDate    time.Time `json:"startDate"`
 					EndDate      time.Time `json:"endDate"`
 				}
-				
+
 				results := []AllocationResult{}
-				
+
 				db.Table("allocations").
-					Select("allocations.id as allocation_id, allocations.device_id, requests.full_name, requests.srn, devices.resource_id, devices.gpu_number, allocations.username, allocations.password, allocations.start_date, allocations.end_date").
+					Select("allocations.id as allocation_id, allocations.device_id, requests.full_name, requests.srn, devices.resource_id, devices.gpu_number, allocations.username, '********' as password, allocations.start_date, allocations.end_date").
 					Joins("left join requests on requests.id = allocations.request_id").
 					Joins("left join devices on devices.id = allocations.device_id").
 					Order("allocations.start_date desc").
@@ -372,47 +490,27 @@ func main() {
 
 			admin.POST("/gpus", func(c *gin.Context) {
 				var device Device
-				if c.ShouldBindJSON(&device) != nil { return }
+				if err := c.ShouldBindJSON(&device); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload format"})
+					return
+				}
 				db.Create(&device)
 				c.JSON(http.StatusCreated, device)
 			})
 
-			// --- Auto-healing GPU fetch endpoint ---
+			// Removed side-effects. Simply fetches current data as determined by the background healer.
 			admin.GET("/gpus", func(c *gin.Context) {
 				var devices []Device
 				db.Find(&devices)
-
-				now := time.Now()
-
-				for i, dev := range devices {
-					if dev.Status == "Under Maintenance" {
-						continue
-					}
-
-					var activeAllocations int64
-					db.Model(&Allocation{}).
-						Where("device_id = ? AND start_date <= ? AND end_date >= ?", dev.ID, now, now).
-						Count(&activeAllocations)
-
-					if activeAllocations > 0 {
-						if dev.Status != "Allocated" {
-							db.Model(&dev).Update("status", "Allocated")
-							devices[i].Status = "Allocated"
-						}
-					} else {
-						if dev.Status == "Allocated" {
-							db.Model(&dev).Update("status", "Available")
-							devices[i].Status = "Available"
-						}
-					}
-				}
-
 				c.JSON(http.StatusOK, devices)
 			})
 
 			admin.PATCH("/gpus/:id", func(c *gin.Context) {
 				var payload map[string]interface{}
-				if c.ShouldBindJSON(&payload) != nil { return }
+				if err := c.ShouldBindJSON(&payload); err != nil {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload format"})
+					return
+				}
 				db.Model(&Device{}).Where("id = ?", c.Param("id")).Updates(payload)
 				c.JSON(http.StatusOK, gin.H{"message": "Updated"})
 			})

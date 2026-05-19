@@ -1,7 +1,8 @@
 # ==========================================
 # STAGE 1: Build the Go binary
 # ==========================================
-FROM golang:1.23-alpine AS builder
+# UPDATED: Using Go 1.25 to match your go.mod requirements
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
@@ -24,8 +25,17 @@ FROM alpine:latest
 
 WORKDIR /
 
+# Create a non-root user for security
+RUN adduser -D -g '' appuser
+
 # Copy ONLY the compiled binary from Stage 1
 COPY --from=builder /ccf-backend /ccf-backend
+
+# Ensure the binary is executable by the new user
+RUN chown appuser:appuser /ccf-backend
+
+# Drop root privileges
+USER appuser
 
 EXPOSE 8080
 

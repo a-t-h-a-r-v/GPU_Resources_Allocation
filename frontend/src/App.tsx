@@ -23,10 +23,26 @@ const ProtectedRoute = ({ isAllowed, children }: ProtectedRouteProps) => {
 };
 
 export default function App() {
-  // Initialize state from localStorage to prevent logout on refresh
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState<boolean>(() => {
     return localStorage.getItem("adminLoggedIn") === "true";
   });
+
+  // Verify server-side session strictly on load rather than trusting localStorage blindly
+  useEffect(() => {
+    const verifyAdminSession = async () => {
+      if (isAdminLoggedIn) {
+        try {
+          const response = await fetch("/api/admin/verify"); // Nginx proxies this and includes cookies
+          if (!response.ok) {
+            handleLogout();
+          }
+        } catch (error) {
+          handleLogout(); // Auto-logout if the API is entirely unreachable
+        }
+      }
+    };
+    verifyAdminSession();
+  }, [isAdminLoggedIn]);
 
   const handleLoginSuccess = () => {
     setIsAdminLoggedIn(true);

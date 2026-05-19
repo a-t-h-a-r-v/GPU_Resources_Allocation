@@ -10,6 +10,12 @@ services:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
+    # NEW: Healthcheck ensures the DB is fully ready before the backend starts
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # 2. Go Backend Service
   backend:
@@ -22,8 +28,10 @@ services:
       - "8080:8080"
     env_file:
       - ./backend/.env
+    # NEW: Wait specifically for the DB healthcheck to pass, not just container start
     depends_on:
-      - db
+      db:
+        condition: service_healthy
       
   # 3. React Frontend Service
   frontend:
@@ -32,8 +40,9 @@ services:
       dockerfile: Dockerfile
     container_name: ccf-frontend
     restart: always
+    # NEW: Map Host port 80 to Container port 8080 (used by unprivileged Nginx)
     ports:
-      - "80:80"
+      - "80:8080"
     depends_on:
       - backend
 
