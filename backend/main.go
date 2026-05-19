@@ -1,8 +1,13 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
+	"errors"
+	"io"
 	"fmt"
 	"log"
 	"math/big"
@@ -71,6 +76,60 @@ type EmailJob struct {
 }
 
 var emailQueue = make(chan EmailJob, 100)
+
+// Encrypts a string using AES-GCM
+func encryptAES(plaintext string, keyString string) (string, error) {
+	key := []byte(keyString)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+
+	nonce := make([]byte, aesGCM.NonceSize())
+	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+
+	ciphertext := aesGCM.Seal(nonce, nonce, []byte(plaintext), nil)
+	return hex.EncodeToString(ciphertext), nil
+}
+
+// Decrypts an AES-GCM encrypted string
+func decryptAES(ciphertextHex string, keyString string) (string, error) {
+	key := []byte(keyString)
+	ciphertext, err := hex.DecodeString(ciphertextHex)
+	if err != nil {
+		return "", err
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+
+	aesGCM, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+
+	nonceSize := aesGCM.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return "", errors.New("ciphertext too short")
+	}
+
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := aesGCM.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", err
+	}
+
+	return string(plaintext), nil
+}
 
 func startEmailWorker() {
 	go func() {
@@ -494,14 +553,39 @@ func main() {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload format"})
 					return
 				}
+
+				encryptionKey := os.Getenv("ENCRYPTION_KEY")
+				encryptedPass, err := encryptAES(device.Password, encryptionKey)
+				if err == nil {
+					device.Password = encryptedPass
+				} else {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encrypt device password"})
+					return
+				}
+
 				db.Create(&device)
+
+				device.Password = "********"
 				c.JSON(http.StatusCreated, device)
 			})
 
-			// Removed side-effects. Simply fetches current data as determined by the background healer.
 			admin.GET("/gpus", func(c *gin.Context) {
 				var devices []Device
 				db.Find(&devices)
+
+				encryptionKey := os.Getenv("ENCRYPTION_KEY")
+
+				for i := range devices {
+					if devices[i].Password != "" {
+						decryptedPass, err := decryptAES(devices[i].Password, encryptionKey)
+						if err == nil {
+							devices[i].Password = decryptedPass
+						} else {
+							devices[i].Password = "Error decrypting"
+						}
+					}
+				}
+
 				c.JSON(http.StatusOK, devices)
 			})
 
@@ -511,6 +595,16 @@ func main() {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload format"})
 					return
 				}
+
+				if newPass, exists := payload["password"]; exists {
+					encryptedPass, err := encryptAES(newPass.(string), os.Getenv("ENCRYPTION_KEY"))
+					if err != nil {
+						c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to encrypt new password"})
+						return
+					}
+					payload["password"] = encryptedPass
+				}
+
 				db.Model(&Device{}).Where("id = ?", c.Param("id")).Updates(payload)
 				c.JSON(http.StatusOK, gin.H{"message": "Updated"})
 			})
