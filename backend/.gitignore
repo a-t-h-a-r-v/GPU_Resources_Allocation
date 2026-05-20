@@ -22,7 +22,6 @@ _cgo_export.*
 
 # Environment variables (Crucial to ignore so you don't leak passwords!)
 .env
-.env.*
 
 # Project specific
 ccf-backend
