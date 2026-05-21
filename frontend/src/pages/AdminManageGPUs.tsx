@@ -70,6 +70,17 @@ export default function AdminManageGPUs() {
     }
   };
 
+  const handleDeleteDevice = async (id: number) => {
+    if (window.confirm("Are you sure you want to delete this GPU? This action cannot be undone.")) {
+      try {
+        await axios.delete(`${API_BASE_URL}/admin/gpus/${id}`, { withCredentials: true });
+        fetchDevices();
+      } catch (err) {
+        alert("Failed to delete device");
+      }
+    }
+  };
+
   const tabDevices = devices.filter(d => d.resourceType === activeTab);
   const resourceIds = Array.from(new Set(tabDevices.map(d => d.resourceId)));
   
@@ -176,12 +187,19 @@ export default function AdminManageGPUs() {
                       </div>
                       
                       <div className="flex gap-2 pt-2">
-                        {/* NEW: Updated onClick handler */}
-                        <Button variant="outline" size="sm" className="w-1/2 text-xs" onClick={() => handleMaintenanceClick(device)}>
+                        <Button variant="outline" size="sm" className="w-1/3 text-[10px]" onClick={() => handleMaintenanceClick(device)}>
                           {device.status === "Under Maintenance" ? "Make Available" : "Maintenance"}
                         </Button>
-                        <Button variant="default" size="sm" className="w-1/2 text-xs" onClick={() => setEditingDevice(device)}>
+                        <Button variant="default" size="sm" className="w-1/3 text-xs" onClick={() => setEditingDevice(device)}>
                           Edit Info
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          className="w-1/3 text-xs bg-red-600 hover:bg-red-700 text-white"
+                          onClick={() => handleDeleteDevice(device.id)}
+                        >
+                          Delete
                         </Button>
                       </div>
                     </CardContent>

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/smtp"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,7 +55,7 @@ type Allocation struct {
 	RequestID uint      `json:"requestId"`
 	DeviceID  uint      `json:"deviceId"`
 	Username  string    `json:"username"`
-	Password  string    `json:"password"` // Stored as bcrypt hash
+	Password  string    `json:"password"`
 	StartDate time.Time `json:"startDate"`
 	EndDate   time.Time `json:"endDate"`
 }
@@ -72,6 +73,7 @@ var mu sync.Mutex
 // --- Email Queue (Worker Pool Pattern) ---
 type EmailJob struct {
 	Type, To, FullName, ResourceID, GPUNumber, IPAddress, Username, Password, StartDate, EndDate, CustomNote, Reason string
+	AllocatedDays int
 }
 
 var emailQueue = make(chan EmailJob, 100)
@@ -137,6 +139,8 @@ func startEmailWorker() {
 				sendAllocationEmail(job.To, job.FullName, job.ResourceID, job.GPUNumber, job.IPAddress, job.Username, job.Password, job.StartDate, job.EndDate, job.CustomNote, job.Reason)
 			} else if job.Type == "DECLINE" {
 				sendDeclineEmail(job.To, job.FullName, job.Reason)
+			} else if job.Type == "ADMIN_NOTIFICATION" {
+				sendAdminNotificationEmail(job.FullName, job.ResourceID, job.GPUNumber, job.StartDate, job.EndDate, job.AllocatedDays)
 			}
 		}
 	}()
@@ -233,7 +237,39 @@ func sendOTPEmail(to, otp string) error {
 	return smtp.SendMail(host+":"+port, auth, from, []string{to}, msg)
 }
 
-// Update the sendAllocationEmail function to accept new parameters
+func sendAdminNotificationEmail(fullName, resourceId, gpuNumber, startDate, endDate string, allocatedDays int) error {
+	emailsEnv := os.Getenv("NOTIFICATION_EMAILS")
+	if emailsEnv == "" {
+		return nil
+	}
+
+	// Split the comma-separated emails into a slice of strings
+	emails := strings.Split(emailsEnv, ",")
+	for i := range emails {
+		emails[i] = strings.TrimSpace(emails[i])
+	}
+
+	from := os.Getenv("SMTP_EMAIL")
+	smtpPassword := os.Getenv("SMTP_PASSWORD")
+	host := os.Getenv("SMTP_HOST")
+	port := os.Getenv("SMTP_PORT")
+
+	subject := "Subject: CCF GPU Portal - New Allocation Notice\r\n"
+	body := fmt.Sprintf("Hello,\r\n\r\nA new GPU allocation has been successfully made.\r\n\r\nUser: %s\r\nAllocated Duration: %d Days\r\nResource ID: %s\r\nGPU Number: %s\r\nStart Date: %s\r\nEnd Date: %s\r\n\r\nRegards,\r\nCCF GPU Portal System", fullName, allocatedDays, resourceId, gpuNumber, startDate, endDate)
+
+	if from == "" || smtpPassword == "" {
+		log.Printf("\n======================================================")
+		log.Printf("📧 Simulated Admin Notification Email to: %s", emailsEnv)
+		log.Printf("Message:\n%s", body)
+		log.Printf("======================================================\n")
+		return nil
+	}
+
+	auth := smtp.PlainAuth("", from, smtpPassword, host)
+	msg := []byte("To: " + emailsEnv + "\r\n" + subject + "\r\n" + body)
+	return smtp.SendMail(host+":"+port, auth, from, emails, msg)
+}
+
 func sendAllocationEmail(to, fullName, resourceId, gpuNumber, ipAddress, username, password, startDate, endDate, customNote, reductionReason string) error {
 	from := os.Getenv("SMTP_EMAIL")
 	smtpPassword := os.Getenv("SMTP_PASSWORD")
@@ -265,8 +301,6 @@ func sendAllocationEmail(to, fullName, resourceId, gpuNumber, ipAddress, usernam
 
 	body += "\r\nPlease ensure you follow the acceptable use policy.\r\n\r\nRegards,\r\nAdmin Team\r\n"
 
-	// ... rest of your sendAllocationEmail logic (the DEV MODE print and smtp.SendMail part) ...
-    // (keep the rest of the function exactly the same)
 	if from == "" || smtpPassword == "" {
 		log.Printf("\n======================================================")
 		log.Printf("⚠️ LOCAL DEV MODE: No SMTP credentials found.")
@@ -281,7 +315,6 @@ func sendAllocationEmail(to, fullName, resourceId, gpuNumber, ipAddress, usernam
 	return smtp.SendMail(host+":"+port, auth, from, []string{to}, msg)
 }
 
-// Add the new Decline Email function
 func sendDeclineEmail(to, fullName, reason string) error {
 	from := os.Getenv("SMTP_EMAIL")
 	smtpPassword := os.Getenv("SMTP_PASSWORD")
@@ -337,7 +370,6 @@ func main() {
 
 	r := gin.Default()
 
-	// Strict CORS
 	r.Use(func(c *gin.Context) {
 		origin := c.Request.Header.Get("Origin")
 		allowedOrigins := map[string]bool{
@@ -375,7 +407,7 @@ func main() {
 			mu.Lock()
 			otpStore[req.Email] = OTPData{
 				Code:      otp,
-				ExpiresAt: time.Now().Add(5 * time.Minute), // Expires in 5 minutes
+				ExpiresAt: time.Now().Add(5 * time.Minute),
 				Attempts:  0,
 			}
 			mu.Unlock()
@@ -392,7 +424,7 @@ func main() {
 			}
 
 			mu.Lock()
-			defer mu.Unlock() // Ensure lock is released even on early return
+			defer mu.Unlock()
 
 			storedOTP, exists := otpStore[req.Email]
 			if !exists || time.Now().After(storedOTP.ExpiresAt) {
@@ -414,7 +446,7 @@ func main() {
 				return
 			}
 
-			delete(otpStore, req.Email) // Success, clear state
+			delete(otpStore, req.Email)
 			c.JSON(http.StatusOK, gin.H{"message": "OTP verified"})
 		})
 
@@ -430,7 +462,7 @@ func main() {
 
 		api.POST("/admin/login", func(c *gin.Context) {
 			var req struct{ Username, Password string }
-			time.Sleep(500 * time.Millisecond) // Throttling
+			time.Sleep(500 * time.Millisecond)
 			if err := c.ShouldBindJSON(&req); err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload format"})
 				return
@@ -488,7 +520,6 @@ func main() {
 					return
 				}
 
-				// Trigger Async email queue
 				emailQueue <- EmailJob{
 					Type:     "DECLINE",
 					To:       req.Email,
@@ -534,11 +565,9 @@ func main() {
 					return
 				}
 
-				// Apply the Custom Allocated Days instead of req.NumberOfDays
 				endDate := startDate.AddDate(0, 0, payload.AllocatedDays)
 
 				err = db.Transaction(func(tx *gorm.DB) error {
-					// INSTEAD of bcrypt, ENCRYPT with AES so admins can read it later
 					encryptedPassword, err := encryptAES(payload.Password, os.Getenv("ENCRYPTION_KEY"))
 					if err != nil {
 						return err
@@ -568,7 +597,6 @@ func main() {
 					return
 				}
 
-				// Enqueue async email
 				emailQueue <- EmailJob{
 					Type:       "ALLOCATION",
 					To:         req.Email,
@@ -577,11 +605,21 @@ func main() {
 					GPUNumber:  device.GPUNumber,
 					IPAddress:  device.IPAddress,
 					Username:   payload.Username,
-					Password:   payload.Password, // Give plain password to email job
+					Password:   payload.Password,
 					StartDate:  startDate.Format("2006-01-02"),
 					EndDate:    endDate.Format("2006-01-02"),
 					CustomNote: payload.EmailNote,
 					Reason:     payload.ReductionReason,
+				}
+
+				emailQueue <- EmailJob{
+					Type:          "ADMIN_NOTIFICATION",
+					FullName:      req.FullName,
+					ResourceID:    device.ResourceID,
+					GPUNumber:     device.GPUNumber,
+					StartDate:     startDate.Format("2006-01-02"),
+					EndDate:       endDate.Format("2006-01-02"),
+					AllocatedDays: payload.AllocatedDays,
 				}
 
 				c.JSON(http.StatusOK, gin.H{"message": "Allocated"})
@@ -603,7 +641,6 @@ func main() {
 
 				results := []AllocationResult{}
 
-				// Note: Fetching actual allocations.password instead of hardcoding '********'
 				db.Table("allocations").
 					Select("allocations.id as allocation_id, allocations.device_id, requests.full_name, requests.srn, devices.resource_id, devices.gpu_number, allocations.username, allocations.password, allocations.start_date, allocations.end_date").
 					Joins("left join requests on requests.id = allocations.request_id").
@@ -611,11 +648,9 @@ func main() {
 					Order("allocations.start_date desc").
 					Scan(&results)
 
-				// Decrypt the passwords so Admin can see them
 				encryptionKey := os.Getenv("ENCRYPTION_KEY")
 				for i := range results {
 					if results[i].Password != "" {
-						// Attempt decrypt. Note: old allocations hashed with bcrypt will show "Error decrypting"
 						decryptedPass, err := decryptAES(results[i].Password, encryptionKey)
 						if err == nil {
 							results[i].Password = decryptedPass
@@ -688,6 +723,15 @@ func main() {
 
 				db.Model(&Device{}).Where("id = ?", c.Param("id")).Updates(payload)
 				c.JSON(http.StatusOK, gin.H{"message": "Updated"})
+			})
+
+			admin.DELETE("/gpus/:id", func(c *gin.Context) {
+				id := c.Param("id")
+				if err := db.Delete(&Device{}, id).Error; err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete device"})
+					return
+				}
+				c.JSON(http.StatusOK, gin.H{"message": "Device deleted successfully"})
 			})
 		}
 	}
