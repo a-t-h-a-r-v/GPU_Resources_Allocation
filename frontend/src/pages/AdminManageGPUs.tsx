@@ -22,12 +22,71 @@ export default function AdminManageGPUs() {
   const [maintenanceReason, setMaintenanceReason] = useState("");
   const [maintenanceRelocateId, setMaintenanceRelocateId] = useState("");
 
+  const [isAddingGPU, setIsAddingGPU] = useState(false);
+  const [newGPUDevice, setNewGPUDevice] = useState<any>({
+    resourceId: "",
+    gpuNumber: "",
+    resourceType: "Server",
+    ipAddress: "",
+    username: "",
+    password: "",
+    credentialActive: true
+  });
+
   const fetchDevices = async () => {
     try {
       const res = await axios.get(`${API_BASE_URL}/admin/gpus`, { withCredentials: true });
       setDevices(res.data);
     } catch (err) {
       console.error("Failed to fetch GPUs", err);
+    }
+  };
+
+  const getNextAvailableGpuNumber = (resourceId: string) => {
+    const gpusInResource = devices
+      .filter(d => d.resourceId === resourceId)
+      .map(d => parseInt(d.gpuNumber))
+      .filter(n => !isNaN(n))
+      .sort((a, b) => a - b);
+
+    let nextNum = 0;
+    if (gpusInResource.length > 0 && gpusInResource[0] > 0) {
+        nextNum = 1;
+    }
+
+    for (const num of gpusInResource) {
+      if (num === nextNum) {
+        nextNum++;
+      }
+    }
+    return nextNum.toString();
+  };
+
+  const handleAddGPUClick = () => {
+    if (!selectedResourceId) return;
+
+    const existingDevice = devices.find(d => d.resourceId === selectedResourceId);
+
+    setNewGPUDevice({
+      resourceId: selectedResourceId,
+      gpuNumber: getNextAvailableGpuNumber(selectedResourceId),
+      resourceType: existingDevice?.resourceType || activeTab,
+      ipAddress: existingDevice?.ipAddress || "",
+      username: existingDevice?.username || "",
+      password: "",
+      credentialActive: true
+    });
+    setIsAddingGPU(true);
+  };
+
+  const handleAddGPUSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      await axios.post(`${API_BASE_URL}/admin/gpus`, newGPUDevice, { withCredentials: true });
+      setIsAddingGPU(false);
+      fetchDevices();
+    } catch (err: any) {
+      alert(err.response?.data?.error || "Failed to add GPU");
     }
   };
 
@@ -193,7 +252,12 @@ export default function AdminManageGPUs() {
         <div className="col-span-3">
           {selectedResourceId && (
             <div className="space-y-4">
-              <h2 className="text-xl font-bold">{selectedResourceId} Details</h2>
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-xl font-bold">{selectedResourceId} Details</h2>
+                <Button onClick={handleAddGPUClick} size="sm" className="bg-primary text-primary-foreground hover:bg-primary/90">
+                  + Add GPU to Device
+                </Button>
+              </div>
               <div className="grid gap-4 md:grid-cols-2">
                 {displayDevices.map(device => (
                   <Card key={device.id} className="relative overflow-hidden shadow-sm hover:shadow-md transition-shadow border-t">
@@ -423,6 +487,64 @@ export default function AdminManageGPUs() {
                   Confirm & Put Under Maintenance
                 </Button>
               </div>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* ADD GPU MODAL */}
+      {isAddingGPU && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <Card className="w-full max-w-lg shadow-xl bg-background">
+            <div className="p-6">
+              <h2 className="text-xl font-bold mb-4">Add GPU to {selectedResourceId}</h2>
+              <form onSubmit={handleAddGPUSubmit} className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground">Resource ID</label>
+                    <input className={`${inputStyles} bg-muted cursor-not-allowed text-muted-foreground`} value={newGPUDevice.resourceId} readOnly />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground">GPU Number (Auto-suggested)</label>
+                    <input
+                      type="number"
+                      className={inputStyles}
+                      value={newGPUDevice.gpuNumber}
+                      onChange={e => setNewGPUDevice({...newGPUDevice, gpuNumber: e.target.value})}
+                      required
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground">Resource Type</label>
+                    <select className={inputStyles} value={newGPUDevice.resourceType} onChange={e => setNewGPUDevice({...newGPUDevice, resourceType: e.target.value})}>
+                      <option value="Server">Server</option>
+                      <option value="Workstation">Workstation</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground">IP Address</label>
+                    <input className={inputStyles} value={newGPUDevice.ipAddress} onChange={e => setNewGPUDevice({...newGPUDevice, ipAddress: e.target.value})} required />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground">Username</label>
+                    <input className={inputStyles} value={newGPUDevice.username} onChange={e => setNewGPUDevice({...newGPUDevice, username: e.target.value})} required />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs font-medium text-muted-foreground">Password</label>
+                    <input type="password" placeholder="Required for new GPU" className={inputStyles} value={newGPUDevice.password} onChange={e => setNewGPUDevice({...newGPUDevice, password: e.target.value})} required />
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 pt-2">
+                  <input type="checkbox" id="newCredActive" checked={newGPUDevice.credentialActive} onChange={e => setNewGPUDevice({...newGPUDevice, credentialActive: e.target.checked})} className="w-4 h-4" />
+                  <label htmlFor="newCredActive" className="text-sm font-medium cursor-pointer">Credential Active</label>
+                </div>
+
+                <div className="flex justify-end gap-2 mt-6">
+                  <Button type="button" variant="outline" onClick={() => setIsAddingGPU(false)}>Cancel</Button>
+                  <Button type="submit">Save & Add GPU</Button>
+                </div>
+              </form>
             </div>
           </Card>
         </div>
