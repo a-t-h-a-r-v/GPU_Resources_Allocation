@@ -74,6 +74,7 @@ var mu sync.Mutex
 type EmailJob struct {
 	Type, To, FullName, ResourceID, GPUNumber, IPAddress, Username, Password, StartDate, EndDate, CustomNote, Reason string
 	AllocatedDays int
+	SRN, Department string // <--- ADD THESE TWO FIELDS
 }
 
 var emailQueue = make(chan EmailJob, 100)
@@ -145,6 +146,9 @@ func startEmailWorker() {
 				sendAllocationRemovedEmail(job.To, job.FullName, job.Reason)
 			} else if job.Type == "ALLOCATION_RELOCATED" {
 				sendAllocationRelocatedEmail(job.To, job.FullName, job.Reason, job.ResourceID, job.GPUNumber, job.IPAddress, job.Username, job.Password)
+			} else if job.Type == "NEW_REQUEST" {
+				// ADD THIS NEW BLOCK
+				sendNewRequestNotificationEmail(job.FullName, job.To, job.SRN, job.Department, job.AllocatedDays)
 			}
 		}
 	}()
@@ -363,6 +367,39 @@ func sendAllocationRelocatedEmail(to, fullName, reason, resourceId, gpuNumber, i
 	return smtp.SendMail(host+":"+port, auth, from, []string{to}, msg)
 }
 
+func sendNewRequestNotificationEmail(fullName, userEmail, srn, department string, requestedDays int) error {
+	emailsEnv := os.Getenv("NEW_REQUEST_EMAILS")
+	if emailsEnv == "" {
+		return nil
+	}
+
+	// Split the comma-separated emails into a slice of strings
+	emails := strings.Split(emailsEnv, ",")
+	for i := range emails {
+		emails[i] = strings.TrimSpace(emails[i])
+	}
+
+	from := os.Getenv("SMTP_EMAIL")
+	smtpPassword := os.Getenv("SMTP_PASSWORD")
+	host := os.Getenv("SMTP_HOST")
+	port := os.Getenv("SMTP_PORT")
+
+	subject := "Subject: CCF GPU Portal - New GPU Request Received\r\n"
+	body := fmt.Sprintf("Hello,\r\n\r\nA new request for GPU resources has been submitted.\r\n\r\nApplicant Details:\r\nName: %s\r\nEmail: %s\r\nSRN: %s\r\nDepartment: %s\r\nRequested Duration: %d Days\r\n\r\nPlease log in to the admin portal to review this request.\r\n\r\nRegards,\r\nCCF GPU Portal System", fullName, userEmail, srn, department, requestedDays)
+
+	if from == "" || smtpPassword == "" {
+		log.Printf("\n======================================================")
+		log.Printf("📧 Simulated New Request Notification to: %s", emailsEnv)
+		log.Printf("Message:\n%s", body)
+		log.Printf("======================================================\n")
+		return nil
+	}
+
+	auth := smtp.PlainAuth("", from, smtpPassword, host)
+	msg := []byte("To: " + emailsEnv + "\r\n" + subject + "\r\n" + body)
+	return smtp.SendMail(host+":"+port, auth, from, emails, msg)
+}
+
 func sendDeclineEmail(to, fullName, reason string) error {
 	from := os.Getenv("SMTP_EMAIL")
 	smtpPassword := os.Getenv("SMTP_PASSWORD")
@@ -505,6 +542,16 @@ func main() {
 				return
 			}
 			db.Create(&form)
+
+			emailQueue <- EmailJob{
+				Type:          "NEW_REQUEST",
+				FullName:      form.FullName,
+				To:            form.Email,
+				SRN:           form.SRN,
+				Department:    form.Department,
+				AllocatedDays: form.NumberOfDays,
+			}
+
 			c.JSON(http.StatusCreated, gin.H{"message": "Saved"})
 		})
 
