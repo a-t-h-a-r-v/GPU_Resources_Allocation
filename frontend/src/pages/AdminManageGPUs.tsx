@@ -12,8 +12,15 @@ export default function AdminManageGPUs() {
   const [selectedResourceId, setSelectedResourceId] = useState<string | null>(null);
   const [editingDevice, setEditingDevice] = useState<any | null>(null);
   
-  // NEW: State to track which passwords are visible
   const [visiblePasswords, setVisiblePasswords] = useState<Record<number, boolean>>({});
+  const [deletingDevice, setDeletingDevice] = useState<any | null>(null);
+  const [deleteAction, setDeleteAction] = useState<"remove" | "relocate">("remove");
+  const [deleteReason, setDeleteReason] = useState("");
+  const [relocateDeviceId, setRelocateDeviceId] = useState("");
+  const [maintenanceDevice, setMaintenanceDevice] = useState<any | null>(null);
+  const [maintenanceAction, setMaintenanceAction] = useState<"remove" | "relocate">("remove");
+  const [maintenanceReason, setMaintenanceReason] = useState("");
+  const [maintenanceRelocateId, setMaintenanceRelocateId] = useState("");
 
   const fetchDevices = async () => {
     try {
@@ -28,29 +35,45 @@ export default function AdminManageGPUs() {
     fetchDevices();
   }, []);
 
-  const toggleStatus = async (id: number, currentStatus: string) => {
+  const toggleStatus = async (id: number, currentStatus: string, action?: string, reason?: string, newDeviceId?: string) => {
     const newStatus = currentStatus === "Under Maintenance" ? "Available" : "Under Maintenance";
     try {
-      await axios.patch(`${API_BASE_URL}/admin/gpus/${id}`, { status: newStatus }, { withCredentials: true });
+      let url = `${API_BASE_URL}/admin/gpus/${id}`;
+      const params = new URLSearchParams();
+
+      if (action) params.append("action", action);
+      if (reason) params.append("reason", reason);
+      if (newDeviceId) params.append("newDeviceId", newDeviceId);
+
+      if (params.toString()) {
+        url += `?${params.toString()}`;
+      }
+
+      await axios.patch(url, { status: newStatus }, { withCredentials: true });
+
+      // Clear Maintenance Modal states
+      setMaintenanceDevice(null);
+      setMaintenanceAction("remove");
+      setMaintenanceReason("");
+      setMaintenanceRelocateId("");
+
       fetchDevices();
-    } catch (err) {
-      alert("Failed to update status");
+    } catch (err: any) {
+      alert(err.response?.data?.error || "Failed to update status");
     }
   };
 
-  // NEW: Intercept Maintenance Click to check for allocation
   const handleMaintenanceClick = (device: any) => {
     if (device.status === "Under Maintenance") {
-      toggleStatus(device.id, device.status); // Safe to revert
+      toggleStatus(device.id, device.status); // Safe to revert back to Available
     } else {
-      // If allocating to maintenance, check if someone is using it
       if (device.status === "Allocated") {
-        const confirmMsg = "WARNING: This GPU is currently allocated to a user!\n\nAre you sure you want to interrupt them and put it under maintenance?";
-        if (!window.confirm(confirmMsg)) {
-          return; // Cancel action
-        }
+        // Trigger the Maintenance Warning Modal
+        setMaintenanceDevice(device);
+      } else {
+        // Safe to put available device directly under maintenance
+        toggleStatus(device.id, device.status);
       }
-      toggleStatus(device.id, device.status);
     }
   };
 
@@ -70,13 +93,38 @@ export default function AdminManageGPUs() {
     }
   };
 
-  const handleDeleteDevice = async (id: number) => {
-    if (window.confirm("Are you sure you want to delete this GPU? This action cannot be undone.")) {
-      try {
-        await axios.delete(`${API_BASE_URL}/admin/gpus/${id}`, { withCredentials: true });
-        fetchDevices();
-      } catch (err) {
-        alert("Failed to delete device");
+  const executeDelete = async (id: number, action?: string, reason?: string, newDeviceId?: string) => {
+    try {
+      let url = `${API_BASE_URL}/admin/gpus/${id}`;
+      const params = new URLSearchParams();
+      if (action) params.append("action", action);
+      if (reason) params.append("reason", reason);
+      if (newDeviceId) params.append("newDeviceId", newDeviceId);
+
+      if (params.toString()) {
+        url += `?${params.toString()}`;
+      }
+
+      await axios.delete(url, { withCredentials: true });
+
+      // Reset states
+      setDeletingDevice(null);
+      setDeleteAction("remove");
+      setDeleteReason("");
+      setRelocateDeviceId("");
+
+      fetchDevices();
+    } catch (err: any) {
+      alert(err.response?.data?.error || "Failed to delete device");
+    }
+  };
+
+  const handleDeleteClick = (device: any) => {
+    if (device.status === "Allocated") {
+      setDeletingDevice(device);
+    } else {
+      if (window.confirm("Are you sure you want to delete this GPU? This action cannot be undone.")) {
+        executeDelete(device.id);
       }
     }
   };
@@ -197,7 +245,7 @@ export default function AdminManageGPUs() {
                           variant="destructive"
                           size="sm"
                           className="w-1/3 text-xs bg-red-600 hover:bg-red-700 text-white"
-                          onClick={() => handleDeleteDevice(device.id)}
+                          onClick={() => handleDeleteClick(device)}
                         >
                           Delete
                         </Button>
@@ -257,6 +305,124 @@ export default function AdminManageGPUs() {
                   <Button type="submit">Save Changes</Button>
                 </div>
               </form>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* ALLOCATED DEVICE DELETION WARNING MODAL */}
+      {deletingDevice && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <Card className="w-full max-w-lg shadow-xl bg-background">
+            <div className="p-6 space-y-4">
+              <h2 className="text-xl font-bold text-red-600">Warning: GPU is Currently Allocated!</h2>
+              <p className="text-sm">
+                The GPU <b>{deletingDevice.resourceId} - {deletingDevice.gpuNumber}</b> is actively assigned to a user. How do you want to handle this allocation before deleting the device?
+              </p>
+
+              <div className="space-y-3 pt-2">
+                <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                  <input type="radio" checked={deleteAction === "remove"} onChange={() => setDeleteAction("remove")} />
+                  Remove Allocation (Notify user and set request back to pending)
+                </label>
+                <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                  <input type="radio" checked={deleteAction === "relocate"} onChange={() => setDeleteAction("relocate")} />
+                  Relocate Allocation (Move user to another available GPU)
+                </label>
+              </div>
+
+              {deleteAction === "relocate" && (
+                <div className="space-y-1 pt-2">
+                  <label className="text-xs font-medium text-muted-foreground">Select Replacement GPU</label>
+                  <select className={inputStyles} value={relocateDeviceId} onChange={(e) => setRelocateDeviceId(e.target.value)} required>
+                    <option value="">-- Choose an Available GPU --</option>
+                    {devices.filter(d => d.status === "Available").map(d => (
+                      <option key={d.id} value={d.id}>{d.resourceId} - {d.gpuNumber} (IP: {d.ipAddress})</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="space-y-1 pt-2">
+                <label className="text-xs font-medium text-muted-foreground">Reason for this action (Required)</label>
+                <textarea
+                  className={`${inputStyles} min-h-[80px] p-2`}
+                  placeholder="Explain why this GPU is being deleted/relocated..."
+                  value={deleteReason}
+                  onChange={(e) => setDeleteReason(e.target.value)}
+                  required
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 mt-6">
+                <Button variant="outline" onClick={() => setDeletingDevice(null)}>Cancel</Button>
+                <Button
+                  variant="destructive"
+                  disabled={!deleteReason || (deleteAction === "relocate" && !relocateDeviceId)}
+                  onClick={() => executeDelete(deletingDevice.id, deleteAction, deleteReason, relocateDeviceId)}
+                >
+                  Confirm Action & Delete
+                </Button>
+              </div>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* ALLOCATED DEVICE MAINTENANCE WARNING MODAL */}
+      {maintenanceDevice && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <Card className="w-full max-w-lg shadow-xl bg-background">
+            <div className="p-6 space-y-4">
+              <h2 className="text-xl font-bold text-orange-600">Warning: GPU is Currently Allocated!</h2>
+              <p className="text-sm">
+                The GPU <b>{maintenanceDevice.resourceId} - {maintenanceDevice.gpuNumber}</b> is actively assigned to a user. How do you want to handle this allocation before putting the device under maintenance?
+              </p>
+
+              <div className="space-y-3 pt-2">
+                <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                  <input type="radio" checked={maintenanceAction === "remove"} onChange={() => setMaintenanceAction("remove")} />
+                  Remove Allocation (Notify user and set request back to pending)
+                </label>
+                <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                  <input type="radio" checked={maintenanceAction === "relocate"} onChange={() => setMaintenanceAction("relocate")} />
+                  Relocate Allocation (Move user to another available GPU)
+                </label>
+              </div>
+
+              {maintenanceAction === "relocate" && (
+                <div className="space-y-1 pt-2">
+                  <label className="text-xs font-medium text-muted-foreground">Select Replacement GPU</label>
+                  <select className={inputStyles} value={maintenanceRelocateId} onChange={(e) => setMaintenanceRelocateId(e.target.value)} required>
+                    <option value="">-- Choose an Available GPU --</option>
+                    {devices.filter(d => d.status === "Available").map(d => (
+                      <option key={d.id} value={d.id}>{d.resourceId} - {d.gpuNumber} (IP: {d.ipAddress})</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="space-y-1 pt-2">
+                <label className="text-xs font-medium text-muted-foreground">Reason for Maintenance (Required)</label>
+                <textarea
+                  className={`${inputStyles} min-h-[80px] p-2`}
+                  placeholder="Explain why this GPU is being put into maintenance..."
+                  value={maintenanceReason}
+                  onChange={(e) => setMaintenanceReason(e.target.value)}
+                  required
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 mt-6">
+                <Button variant="outline" onClick={() => setMaintenanceDevice(null)}>Cancel</Button>
+                <Button
+                  className="bg-orange-600 hover:bg-orange-700 text-white"
+                  disabled={!maintenanceReason || (maintenanceAction === "relocate" && !maintenanceRelocateId)}
+                  onClick={() => toggleStatus(maintenanceDevice.id, maintenanceDevice.status, maintenanceAction, maintenanceReason, maintenanceRelocateId)}
+                >
+                  Confirm & Put Under Maintenance
+                </Button>
+              </div>
             </div>
           </Card>
         </div>

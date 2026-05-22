@@ -141,6 +141,10 @@ func startEmailWorker() {
 				sendDeclineEmail(job.To, job.FullName, job.Reason)
 			} else if job.Type == "ADMIN_NOTIFICATION" {
 				sendAdminNotificationEmail(job.FullName, job.ResourceID, job.GPUNumber, job.StartDate, job.EndDate, job.AllocatedDays)
+			} else if job.Type == "ALLOCATION_REMOVED" {
+				sendAllocationRemovedEmail(job.To, job.FullName, job.Reason)
+			} else if job.Type == "ALLOCATION_RELOCATED" {
+				sendAllocationRelocatedEmail(job.To, job.FullName, job.Reason, job.ResourceID, job.GPUNumber, job.IPAddress, job.Username, job.Password)
 			}
 		}
 	}()
@@ -305,6 +309,50 @@ func sendAllocationEmail(to, fullName, resourceId, gpuNumber, ipAddress, usernam
 		log.Printf("\n======================================================")
 		log.Printf("⚠️ LOCAL DEV MODE: No SMTP credentials found.")
 		log.Printf("📧 Simulated Allocation Email to: %s", to)
+		log.Printf("Message:\n%s", body)
+		log.Printf("======================================================\n")
+		return nil
+	}
+
+	auth := smtp.PlainAuth("", from, smtpPassword, host)
+	msg := []byte("To: " + to + "\r\n" + subject + "\r\n" + body)
+	return smtp.SendMail(host+":"+port, auth, from, []string{to}, msg)
+}
+
+func sendAllocationRemovedEmail(to, fullName, reason string) error {
+	from := os.Getenv("SMTP_EMAIL")
+	smtpPassword := os.Getenv("SMTP_PASSWORD")
+	host := os.Getenv("SMTP_HOST")
+	port := os.Getenv("SMTP_PORT")
+
+	subject := "Subject: CCF GPU Portal - Allocation Removed\r\n"
+	body := fmt.Sprintf("Dear %s,\r\n\r\nWe regret to inform you that your current GPU allocation has been removed by the administrator.\r\n\r\nReason provided:\r\n%s\r\n\r\nIf you have any questions, please contact the administration.\r\n\r\nRegards,\r\nAdmin Team\r\n", fullName, reason)
+
+	if from == "" || smtpPassword == "" {
+		log.Printf("\n======================================================")
+		log.Printf("📧 Simulated Allocation Removed Email to: %s", to)
+		log.Printf("Message:\n%s", body)
+		log.Printf("======================================================\n")
+		return nil
+	}
+
+	auth := smtp.PlainAuth("", from, smtpPassword, host)
+	msg := []byte("To: " + to + "\r\n" + subject + "\r\n" + body)
+	return smtp.SendMail(host+":"+port, auth, from, []string{to}, msg)
+}
+
+func sendAllocationRelocatedEmail(to, fullName, reason, resourceId, gpuNumber, ipAddress, username, password string) error {
+	from := os.Getenv("SMTP_EMAIL")
+	smtpPassword := os.Getenv("SMTP_PASSWORD")
+	host := os.Getenv("SMTP_HOST")
+	port := os.Getenv("SMTP_PORT")
+
+	subject := "Subject: CCF GPU Portal - Allocation Relocated\r\n"
+	body := fmt.Sprintf("Dear %s,\r\n\r\nYour GPU allocation has been relocated by the administrator.\r\n\r\nReason provided:\r\n%s\r\n\r\nNew Allocation Details:\r\n- Resource ID: %s\r\n- GPU Number: %s\r\n- IP Address: %s\r\n- Username: %s\r\n- Password: %s\r\n\r\nRegards,\r\nAdmin Team\r\n", fullName, reason, resourceId, gpuNumber, ipAddress, username, password)
+
+	if from == "" || smtpPassword == "" {
+		log.Printf("\n======================================================")
+		log.Printf("📧 Simulated Allocation Relocation Email to: %s", to)
 		log.Printf("Message:\n%s", body)
 		log.Printf("======================================================\n")
 		return nil
@@ -706,10 +754,77 @@ func main() {
 			})
 
 			admin.PATCH("/gpus/:id", func(c *gin.Context) {
+				id := c.Param("id")
+				action := c.Query("action") // "remove" or "relocate"
+				reason := c.Query("reason")
+				newDeviceID := c.Query("newDeviceId")
+
 				var payload map[string]interface{}
 				if err := c.ShouldBindJSON(&payload); err != nil {
 					c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload format"})
 					return
+				}
+
+				// Check if the device is being moved to "Under Maintenance"
+				if targetStatus, exists := payload["status"]; exists && targetStatus == "Under Maintenance" {
+					var device Device
+					if err := db.First(&device, id).Error; err != nil {
+						c.JSON(http.StatusNotFound, gin.H{"error": "Device not found"})
+						return
+					}
+
+					// If the device is currently allocated, handle the active allocation
+					if device.Status == "Allocated" {
+						var allocation Allocation
+						if err := db.Where("device_id = ? AND start_date <= ? AND end_date >= ?", device.ID, time.Now(), time.Now()).First(&allocation).Error; err == nil {
+							var req Request
+							db.First(&req, allocation.RequestID)
+
+							if action == "remove" {
+								// Remove Allocation
+								db.Delete(&allocation)
+								req.Status = "Pending"
+								db.Save(&req)
+
+								emailQueue <- EmailJob{
+									Type:     "ALLOCATION_REMOVED",
+									To:       req.Email,
+									FullName: req.FullName,
+									Reason:   reason,
+								}
+							} else if action == "relocate" {
+								// Relocate Allocation
+								var newDevice Device
+								if err := db.First(&newDevice, newDeviceID).Error; err != nil || newDevice.Status != "Available" {
+									c.JSON(http.StatusBadRequest, gin.H{"error": "Target GPU is invalid or not available"})
+									return
+								}
+
+								allocation.DeviceID = newDevice.ID
+								db.Save(&allocation)
+
+								newDevice.Status = "Allocated"
+								db.Save(&newDevice)
+
+								decryptedPass, _ := decryptAES(newDevice.Password, os.Getenv("ENCRYPTION_KEY"))
+
+								emailQueue <- EmailJob{
+									Type:       "ALLOCATION_RELOCATED",
+									To:         req.Email,
+									FullName:   req.FullName,
+									Reason:     reason,
+									ResourceID: newDevice.ResourceID,
+									GPUNumber:  newDevice.GPUNumber,
+									IPAddress:  newDevice.IPAddress,
+									Username:   newDevice.Username,
+									Password:   decryptedPass,
+								}
+							} else {
+								c.JSON(http.StatusBadRequest, gin.H{"error": "Device is actively allocated. Action (remove/relocate) required."})
+								return
+							}
+						}
+					}
 				}
 
 				if newPass, exists := payload["password"]; exists {
@@ -721,12 +836,78 @@ func main() {
 					payload["password"] = encryptedPass
 				}
 
-				db.Model(&Device{}).Where("id = ?", c.Param("id")).Updates(payload)
+				db.Model(&Device{}).Where("id = ?", id).Updates(payload)
 				c.JSON(http.StatusOK, gin.H{"message": "Updated"})
 			})
 
 			admin.DELETE("/gpus/:id", func(c *gin.Context) {
 				id := c.Param("id")
+				action := c.Query("action") // "remove" or "relocate"
+				reason := c.Query("reason")
+				newDeviceID := c.Query("newDeviceId")
+
+				var device Device
+				if err := db.First(&device, id).Error; err != nil {
+					c.JSON(http.StatusNotFound, gin.H{"error": "Device not found"})
+					return
+				}
+
+				if device.Status == "Allocated" {
+					var allocation Allocation
+					// Find the active allocation
+					if err := db.Where("device_id = ? AND start_date <= ? AND end_date >= ?", device.ID, time.Now(), time.Now()).First(&allocation).Error; err == nil {
+						var req Request
+						db.First(&req, allocation.RequestID)
+
+						if action == "remove" {
+							// 1. Remove Allocation
+							db.Delete(&allocation)
+							req.Status = "Pending" // Move request back to pending
+							db.Save(&req)
+
+							emailQueue <- EmailJob{
+								Type:     "ALLOCATION_REMOVED",
+								To:       req.Email,
+								FullName: req.FullName,
+								Reason:   reason,
+							}
+						} else if action == "relocate" {
+							// 2. Relocate Allocation
+							var newDevice Device
+							if err := db.First(&newDevice, newDeviceID).Error; err != nil || newDevice.Status != "Available" {
+								c.JSON(http.StatusBadRequest, gin.H{"error": "Target GPU is invalid or not available"})
+								return
+							}
+
+							allocation.DeviceID = newDevice.ID
+							db.Save(&allocation)
+
+							newDevice.Status = "Allocated"
+							db.Save(&newDevice)
+
+							decryptedPass, _ := decryptAES(newDevice.Password, os.Getenv("ENCRYPTION_KEY"))
+
+							emailQueue <- EmailJob{
+								Type:       "ALLOCATION_RELOCATED",
+								To:         req.Email,
+								FullName:   req.FullName,
+								Reason:     reason,
+								ResourceID: newDevice.ResourceID,
+								GPUNumber:  newDevice.GPUNumber,
+								IPAddress:  newDevice.IPAddress,
+								Username:   newDevice.Username,
+								Password:   decryptedPass,
+							}
+						} else {
+							c.JSON(http.StatusBadRequest, gin.H{"error": "Device is actively allocated. Action (remove/relocate) required."})
+							return
+						}
+					}
+				}
+
+				// Clear past allocations tied to this device to prevent Foreign Key constraints failing
+				db.Where("device_id = ?", id).Delete(&Allocation{})
+
 				if err := db.Delete(&Device{}, id).Error; err != nil {
 					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete device"})
 					return
